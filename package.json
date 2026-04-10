@@ -1,5 +1,5 @@
 {
-  "name": "lark-mcp-server",
+  "name": "yet-another-lark-mcp",
   "version": "0.3.0",
   "description": "MCP server for Lark/Feishu — calendar, tasks, messaging, docs",
   "type": "module",

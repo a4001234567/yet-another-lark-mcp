@@ -22,8 +22,8 @@
 ## 2. Clone and install
 
 ```bash
-git clone https://github.com/a4001234567/lark-mcp-server
-cd lark-mcp-server
+git clone https://github.com/a4001234567/yet-another-lark-mcp
+cd yet-another-lark-mcp
 npm install
 ```
 

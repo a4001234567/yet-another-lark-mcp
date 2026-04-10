@@ -1,4 +1,4 @@
-# lark-mcp-server
+# Yet Another Lark MCP
 
 Personal MCP server for Lark/Feishu — calendar, tasks, messaging, docs, and people search.
 
@@ -8,17 +8,21 @@ Runs as a stdio process. Connect it to Claude Code, Claude Desktop, Cursor, Zed,
 
 ---
 
-## Why this one?
+## What makes this different
 
-Most Lark/Feishu integrations are enterprise plugins or read-only bots. This server is built for a single personal account and prioritizes autonomous AI use:
+The Lark/Feishu open platform exposes hundreds of raw API endpoints. Most existing tools just re-wrap them one-to-one. This server does something different: it **streamlines the interface for single-person use**, trading breadth for ergonomics.
 
-- **Watch loop** — `feishu_im_watch` blocks until a message, card callback, or scheduled reminder arrives. One tool call drives the entire event loop; no polling, no webhooks to configure.
-- **Interactive cards** — confirm dialogs, input forms, and live-updating progress trackers. The AI can ask clarifying questions or request confirmation without leaving Feishu.
-- **Scheduled reminders** — cron-style schedules fire inside the watch loop. Works without a separate process or cron daemon.
-- **OAuth on demand** — calendar, tasks, and docs require user authorization. When credentials are missing, the server sends an auth card to the owner in Feishu automatically — no manual token management.
-- **No external dependencies** — stdlib only beyond the Lark SDK and MCP SDK. No database, no Redis, no persistent process beyond the stdio server itself.
+- **Curated, not comprehensive.** Only tools that matter for personal productivity are included. Actions are merged where it makes sense — list and search are one call, patch handles both edit and complete. No Bitable, no enterprise admin APIs, no multi-tenant plumbing.
 
-This is a personal productivity tool, not enterprise middleware. It won't scale to multiple users, but it gives one person full programmatic access to their Lark workspace from any AI assistant.
+- **Skill files included.** Each tool module ships with a SKILL.md that gives the AI model the context it needs to use the API correctly. This closes the gap between "has the tool" and "knows how to use it well" — something a raw API wrapper leaves entirely to prompt engineering.
+
+- **Runs anywhere MCP runs.** Stdio transport means it works with Claude Code, Claude Desktop, Cursor, Zed, or any other MCP client. The skills travel with it.
+
+- **Watch loop built in.** `feishu_im_watch` drives a full event loop — messages, card callbacks, and cron schedules all surface through one blocking call. No webhooks, no polling infrastructure, no sidecar process.
+
+- **Interactive cards.** Confirm dialogs, input forms, and live-updating progress trackers. The AI can request clarification or confirmation without leaving Feishu.
+
+**Known limitation:** Feishu Base (多维表格 / Bitable) editing is not supported.
 
 ---
 

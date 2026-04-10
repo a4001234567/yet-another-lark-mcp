@@ -1,0 +1,21 @@
+{
+  "name": "lark-mcp-server",
+  "version": "0.3.0",
+  "description": "MCP server for Lark/Feishu — calendar, tasks, messaging, docs",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.59.0",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "croner": "10.0.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -82,6 +82,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 | `LARK_APP_ID` | Yes | — | App ID from Lark developer console (`cli_xxx`) |
 | `LARK_APP_SECRET` | Yes | — | App secret |
 | `LARK_TIMEZONE` | No | `Asia/Shanghai` | Timezone for date parsing and display |
+| `LARK_NO_WATCH` | No | — | Set to `1` to skip the WebSocket connection. Use this for a send-only instance running alongside a separate watch-loop instance on the same app. |
 
 ---
 

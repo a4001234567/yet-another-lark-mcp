@@ -46,12 +46,16 @@ const server = new McpServer({
 // Load persisted token and schedule auto-refresh
 initAuth();
 
-// Attempt WebSocket long connection for real-time IM events (falls back to polling if unavailable)
+// Attempt WebSocket long connection for real-time IM events.
+// Set LARK_NO_WATCH=1 to skip — useful for a send-only instance sharing the same app
+// with a separate watch-loop instance (avoids event delivery collisions).
 const appId = process.env.LARK_APP_ID;
 const appSecret = process.env.LARK_APP_SECRET;
 if (appId && appSecret) {
   fetchOwnerOpenIdFromApp(appId, appSecret).catch(() => { /* error logged inside */ });
-  startWsClient(appId, appSecret).catch(() => { /* fallback handled inside */ });
+  if (!process.env.LARK_NO_WATCH) {
+    startWsClient(appId, appSecret).catch(() => { /* fallback handled inside */ });
+  }
 }
 
 // Wrap server.tool to log every tool call before registering tools

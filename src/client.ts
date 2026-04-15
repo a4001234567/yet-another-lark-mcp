@@ -5,6 +5,7 @@
 
 import * as lark from '@larksuiteoapi/node-sdk';
 import { getUserToken } from './auth.js';
+import { stderrLogger } from './logger.js';
 
 let _client: lark.Client | null = null;
 
@@ -13,7 +14,7 @@ export function getLarkClient(): lark.Client {
     const appId = process.env.LARK_APP_ID;
     const appSecret = process.env.LARK_APP_SECRET;
     if (!appId || !appSecret) throw new Error('LARK_APP_ID and LARK_APP_SECRET must be set');
-    _client = new lark.Client({ appId, appSecret, loggerLevel: lark.LoggerLevel.error });
+    _client = new lark.Client({ appId, appSecret, loggerLevel: lark.LoggerLevel.error, logger: stderrLogger });
   }
   return _client;
 }

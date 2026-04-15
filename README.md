@@ -31,6 +31,8 @@ Each tier is a strict superset of the previous — start small, add OAuth when y
 - **Multiple card types.** Confirm/cancel dialogs, multi-field input forms (with password/hidden fields), and live-updating progress trackers. The AI can ask questions or request approval without leaving Feishu.
 - **Skill files included.** SKILL.md files for each module expose as MCP prompts — inject them to give the model domain context on demand.
 - **OAuth on demand.** When user auth is needed, the server sends an auth card to the owner in Feishu automatically. No manual token steps.
+- **Token-efficient output.** Responses are formatted to be compact — IDs are compressed, recurring events are grouped, cancelled entries are filtered. Less noise for the model, fewer tokens per response.
+- **Recurring event support.** The calendar API handles the full complexity of recurring events: search and list expand individual instances (not just templates). Patching or deleting a specific occurrence — for example, changing the location of next Tuesday's weekly standup without affecting any other date — automatically materialises that instance first, so only the target occurrence is modified, not the whole series.
 
 **Known limitation:** Feishu Base (多维表格 / Bitable) editing is not supported.
 

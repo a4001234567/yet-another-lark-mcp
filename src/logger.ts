@@ -15,6 +15,19 @@ import { appendFileSync, mkdirSync, renameSync, statSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
+// ── Stderr-only SDK logger ───────────────────────────────────────────────────
+// The Lark SDK's defaultLogger writes to stdout (console.info/log), which
+// corrupts the MCP stdio transport. Pass this to any lark.Client, WSClient,
+// or EventDispatcher constructor to redirect all SDK output to stderr.
+
+export const stderrLogger = {
+  error: (...msg: any[]) => process.stderr.write(`[lark-sdk] error: ${msg.join(' ')}\n`),
+  warn:  (...msg: any[]) => process.stderr.write(`[lark-sdk] warn:  ${msg.join(' ')}\n`),
+  info:  (...msg: any[]) => process.stderr.write(`[lark-sdk] info:  ${msg.join(' ')}\n`),
+  debug: (...msg: any[]) => process.stderr.write(`[lark-sdk] debug: ${msg.join(' ')}\n`),
+  trace: (...msg: any[]) => process.stderr.write(`[lark-sdk] trace: ${msg.join(' ')}\n`),
+};
+
 const LOG_DIR  = join(homedir(), '.config', 'lark-mcp');
 const LOG_FILE = join(LOG_DIR, 'lark-mcp.log');
 const LOG_OLD  = join(LOG_DIR, 'lark-mcp.log.old');

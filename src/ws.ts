@@ -21,7 +21,7 @@ import { join } from 'path';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { lookupCard, removeCard, buildConfirmRespondedCard, buildFormSubmittedCard } from './card-registry.js';
 import { buildProgressCard, ProgressStep } from './cards/progress.js';
-import { logMessage } from './logger.js';
+import { logMessage, stderrLogger } from './logger.js';
 
 export type QueuedMessage = {
   message_id:  string;
@@ -267,7 +267,7 @@ async function patchCardViaApi(message_id: string, cardJson: object): Promise<vo
  * Non-blocking after connection — the client manages reconnects internally.
  */
 export async function startWsClient(appId: string, appSecret: string): Promise<void> {
-  const dispatcher = new lark.EventDispatcher({}).register({
+  const dispatcher = new lark.EventDispatcher({ logger: stderrLogger }).register({
     // eslint-disable-next-line @typescript-eslint/naming-convention
     'im.message.receive_v1': async (data: any) => {
       const msg = data?.message;
@@ -366,7 +366,7 @@ export async function startWsClient(appId: string, appSecret: string): Promise<v
     },
   });
 
-  const wsClient = new lark.WSClient({ appId, appSecret });
+  const wsClient = new lark.WSClient({ appId, appSecret, logger: stderrLogger });
 
   // The SDK's handleEventData only processes WS messages with type="event".
   // Card action callbacks arrive with type="card" and are silently discarded.

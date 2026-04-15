@@ -35,6 +35,18 @@ import { registerDocTools } from './tools/docs.js';
 import { registerPrompts } from './prompts.js';
 
 // ---------------------------------------------------------------------------
+// Global error safety — prevent unhandled rejections from crashing the process
+// ---------------------------------------------------------------------------
+
+process.on('unhandledRejection', (reason) => {
+  process.stderr.write(`[lark-mcp] Unhandled rejection (kept alive): ${reason}\n`);
+});
+
+process.on('uncaughtException', (err) => {
+  process.stderr.write(`[lark-mcp] Uncaught exception (kept alive): ${err?.message ?? err}\n`);
+});
+
+// ---------------------------------------------------------------------------
 // Server setup
 // ---------------------------------------------------------------------------
 

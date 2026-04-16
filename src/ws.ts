@@ -248,6 +248,19 @@ export function drainCallbackQueue(): QueuedCallback[] {
   return callbackQueue.splice(0, callbackQueue.length);
 }
 
+// ---------------------------------------------------------------------------
+// Generic card-action hooks — for modules that handle their own card buttons
+// ---------------------------------------------------------------------------
+
+type CardActionHookResult = { handled: true; toast?: any; card?: any } | { handled: false };
+type CardActionHook = (messageId: string, action: string, cb: QueuedCallback) => CardActionHookResult;
+
+const cardActionHooks: CardActionHook[] = [];
+
+export function registerCardActionHook(hook: CardActionHook): void {
+  cardActionHooks.push(hook);
+}
+
 
 /** Patch a card message via the REST API. Must be called AFTER the WS callback response is sent. */
 async function patchCardViaApi(message_id: string, cardJson: object): Promise<void> {
@@ -321,6 +334,15 @@ export async function startWsClient(appId: string, appSecret: string): Promise<v
       //     return it to the AI on the next poll tick.
       //   - Poll mode does not produce card callback events at all (im.message.list does not
       //     include card actions), so this handler is only reached in WS mode.
+      // Generic hooks — registered by other modules (e.g. token proxy)
+      for (const hook of cardActionHooks) {
+        const result = hook(messageId, actionStr, cb);
+        if (result.handled) {
+          const { toast, card } = result;
+          return { toast, card };
+        }
+      }
+
       // Progress card stop button
       if (actionStr === 'stop' && progressStore.has(messageId)) {
         stopSignals.add(messageId);

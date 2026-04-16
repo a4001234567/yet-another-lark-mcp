@@ -32,6 +32,7 @@ import { registerTaskTools } from './tools/task.js';
 import { registerImTools } from './tools/im.js';
 import { registerLoopTools } from './tools/loop.js';
 import { registerDocTools } from './tools/docs.js';
+import { registerTokenProxyTools } from './tools/token-proxy.js';
 import { registerPrompts } from './prompts.js';
 
 // ---------------------------------------------------------------------------
@@ -98,6 +99,7 @@ registerTaskTools(server);
 registerImTools(server);
 registerLoopTools(server);
 registerDocTools(server);
+await registerTokenProxyTools(server);
 
 // Prompts (skill guides)
 registerPrompts(server);

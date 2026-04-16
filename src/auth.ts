@@ -10,6 +10,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { homedir } from 'os';
 import { join, dirname } from 'path';
 import https from 'https';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 
 const TOKEN_FILE = join(homedir(), '.config', 'lark-mcp', 'tokens.json');
 
@@ -103,6 +104,37 @@ let _appOwnerOpenId: string | null = null;
 const _grantedScopes = new Set<string>();
 
 // ---------------------------------------------------------------------------
+// Token file encryption (AES-256-GCM, key derived from LARK_APP_SECRET)
+// ---------------------------------------------------------------------------
+
+interface EncryptedEntry {
+  version: 2;
+  iv:   string; // hex
+  tag:  string; // hex
+  data: string; // hex
+}
+
+function deriveKey(appSecret: string): Buffer {
+  return createHash('sha256').update(appSecret).digest();
+}
+
+function encryptEntry(plain: TokenStore, appSecret: string): EncryptedEntry {
+  const key = deriveKey(appSecret);
+  const iv  = randomBytes(12); // 96-bit GCM IV
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const enc = Buffer.concat([cipher.update(JSON.stringify(plain), 'utf8'), cipher.final()]);
+  return { version: 2, iv: iv.toString('hex'), tag: cipher.getAuthTag().toString('hex'), data: enc.toString('hex') };
+}
+
+function decryptEntry(e: EncryptedEntry, appSecret: string): TokenStore {
+  const key     = deriveKey(appSecret);
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(e.iv, 'hex'));
+  decipher.setAuthTag(Buffer.from(e.tag, 'hex'));
+  const plain = Buffer.concat([decipher.update(Buffer.from(e.data, 'hex')), decipher.final()]);
+  return JSON.parse(plain.toString('utf8')) as TokenStore;
+}
+
+// ---------------------------------------------------------------------------
 // Token file persistence
 // ---------------------------------------------------------------------------
 
@@ -110,17 +142,33 @@ function loadTokenFile(): TokenStore | null {
   try {
     if (!existsSync(TOKEN_FILE)) return null;
     const raw = JSON.parse(readFileSync(TOKEN_FILE, 'utf8'));
-    const appId = process.env.LARK_APP_ID;
-    // New format: { [appId]: TokenStore }
-    if (appId && raw[appId] && typeof raw[appId] === 'object') return raw[appId] as TokenStore;
-    // Legacy flat format migration: if file has access_token at top level, it's the old single-instance format
+    const appId     = process.env.LARK_APP_ID;
+    const appSecret = process.env.LARK_APP_SECRET;
+    // New keyed format: { [appId]: TokenStore | EncryptedEntry }
+    if (appId && raw[appId] && typeof raw[appId] === 'object') {
+      const entry = raw[appId];
+      if (entry.version === 2) {
+        if (!appSecret) {
+          process.stderr.write('[lark-mcp] tokens.json is encrypted but LARK_APP_SECRET is not set — re-auth required\n');
+          return null;
+        }
+        try {
+          return decryptEntry(entry as EncryptedEntry, appSecret);
+        } catch {
+          process.stderr.write('[lark-mcp] Failed to decrypt tokens.json (app secret changed?) — re-auth required\n');
+          return null;
+        }
+      }
+      return entry as TokenStore;
+    }
+    // Legacy flat format migration
     if (raw.access_token !== undefined) {
       if (appId) {
-        // Migrate in-place: wrap under appId key and re-save
-        const migrated = { [appId]: raw };
+        const migrated: Record<string, any> = {};
+        migrated[appId] = appSecret ? encryptEntry(raw as TokenStore, appSecret) : raw;
         mkdirSync(dirname(TOKEN_FILE), { recursive: true });
         writeFileSync(TOKEN_FILE, JSON.stringify(migrated, null, 2));
-        process.stderr.write(`[lark-mcp] Migrated tokens.json to appId-keyed format (${appId})\n`);
+        process.stderr.write(`[lark-mcp] Migrated tokens.json to keyed${appSecret ? ' + encrypted' : ''} format\n`);
       }
       return raw as TokenStore;
     }
@@ -132,21 +180,19 @@ function loadTokenFile(): TokenStore | null {
 
 function saveTokenFile(t: TokenStore) {
   mkdirSync(dirname(TOKEN_FILE), { recursive: true });
-  const appId = process.env.LARK_APP_ID;
+  const appId     = process.env.LARK_APP_ID;
+  const appSecret = process.env.LARK_APP_SECRET;
+  const entry     = appSecret ? encryptEntry(t, appSecret) : t;
   if (!appId) {
-    // Fallback: write flat (no appId available — should not happen in normal use)
-    writeFileSync(TOKEN_FILE, JSON.stringify(t, null, 2));
+    writeFileSync(TOKEN_FILE, JSON.stringify(entry, null, 2));
     return;
   }
-  // Read existing file and update only this appId's entry
   let existing: Record<string, any> = {};
   try {
     const raw = JSON.parse(readFileSync(TOKEN_FILE, 'utf8'));
-    // If old flat format still on disk, start fresh keyed store
-    if (raw.access_token !== undefined) existing = {};
-    else existing = raw;
+    if (raw.access_token === undefined) existing = raw;
   } catch { /* start fresh */ }
-  existing[appId] = t;
+  existing[appId] = entry;
   writeFileSync(TOKEN_FILE, JSON.stringify(existing, null, 2));
 }
 

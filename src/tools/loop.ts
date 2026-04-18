@@ -111,8 +111,18 @@ export function registerLoopTools(server: McpServer) {
         let lastReplyTo: string | undefined;
 
         for (const m of batch) {
-          const text = typeof m.content === 'string' ? m.content
-            : (m.content?.text ?? (m.content?.image_key ? '[image]' : JSON.stringify(m.content)));
+          let text: string;
+          if (typeof m.content === 'string') {
+            text = m.content;
+          } else if (m.msg_type === 'text') {
+            text = m.content?.text ?? '[empty text]';
+          } else if (m.msg_type === 'image') {
+            text = `[image image_key=${m.content?.image_key ?? '?'} message_id=${m.message_id}]`;
+          } else if (m.msg_type === 'file' || m.msg_type === 'media') {
+            text = `[${m.msg_type} file_key=${m.content?.file_key ?? '?'} name="${m.content?.file_name ?? '?'}" message_id=${m.message_id}]`;
+          } else {
+            text = JSON.stringify(m.content);
+          }
           // Include date + time: "2026-04-03 19:45"
           const dt = new Date(m.create_time);
           const dateStr = dt.toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }); // "YYYY-MM-DD"
@@ -244,7 +254,7 @@ export function registerLoopTools(server: McpServer) {
         }
       }
 
-      return 'No incoming messages. Re-initiate feishu_im_watch immediately.';
+      return 'feishu_im_watch timed out without any new messages. Please re-execute feishu_im_watch to resume listening.';
     }),
   );
 

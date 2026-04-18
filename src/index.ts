@@ -88,7 +88,7 @@ const _origTool = server.tool.bind(server);
       }
     };
   }
-  return _origTool(name, ...rest);
+  return (_origTool as any)(name, ...rest);
 };
 
 // Tools
@@ -111,3 +111,11 @@ registerPrompts(server);
 const transport = new StdioServerTransport();
 await server.connect(transport);
 process.stderr.write('[lark-mcp] Server ready\n');
+
+// Exit when the MCP client disconnects (stdin closes).
+// Without this, the WS long-connection keeps Node alive indefinitely,
+// leaving zombie processes after Claude Desktop exits.
+process.stdin.on('end', () => {
+  process.stderr.write('[lark-mcp] stdin closed — exiting\n');
+  process.exit(0);
+});

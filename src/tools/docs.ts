@@ -6,9 +6,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import https from 'https';
 import { createReadStream, statSync } from 'fs';
-import { getLarkClient, asUser } from '../client.js';
-import { getUserToken } from '../auth.js';
+import { getLarkClient, asUser, withAuth } from '../client.js';
+import { getUserToken, getTenantAccessToken } from '../auth.js';
 import { withModuleAuth } from '../auth-guard.js';
+
+// Default wiki space (set via LARK_WIKI_SPACE env var)
+const DEFAULT_WIKI_SPACE_ID = process.env.LARK_WIKI_SPACE || '';
 
 function larkPost(path: string, body: any, token: string): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -436,6 +439,355 @@ export function registerDocTools(server: McpServer) {
       const resCode = res?.code ?? res?.data?.code;
       if (resCode !== 0 && resCode !== undefined) throw new Error(`Lark API ${resCode}: ${res?.msg ?? res?.data?.msg} | block_type=${block_type} key=${blockKey}`);
       return { ok: true, document_id, appended: true, type };
+    }),
+  );
+
+  // ── wiki create node ───────────────────────────────────────────────────────
+  server.tool(
+    'feishu_wiki_create_node',
+    [
+      'Create a node in a Wiki knowledge space.',
+      'obj_type options: document (default), folder.',
+      'Use folder type to create directory nodes for organizing API docs.',
+      'Set via LARK_WIKI_SPACE environment variable for default space.',
+    ].join('\n'),
+    {
+      space_id:        z.string().describe('Knowledge space ID'),
+      obj_type:        z.enum(['document', 'folder']).default('document').optional().describe('Node type: document or folder (directory)'),
+      parent_node_token: z.string().optional().describe('Parent node token. Omit for root level.'),
+      title:           z.string().describe('Node title'),
+    },
+    async ({ space_id, obj_type = 'document', parent_node_token, title }) => withModuleAuth('docs', async () => {
+      const token = getUserToken();
+      const body: any = { obj_type, title };
+      if (parent_node_token) body.parent_node_token = parent_node_token;
+
+      const res = await new Promise<any>((resolve, reject) => {
+        const payload = JSON.stringify(body);
+        const req = https.request(
+          { hostname: 'open.feishu.cn', path: `/open-apis/wiki/v2/spaces/${space_id}/nodes`, method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
+          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+        );
+        req.on('error', reject);
+        req.write(payload);
+        req.end();
+      });
+
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return {
+        node_token: res.data?.node?.node_token,
+        obj_type: res.data?.node?.obj_type,
+        obj_token: res.data?.node?.obj_token,
+        title: res.data?.node?.title,
+      };
+    }),
+  );
+
+  // ── wiki add member ────────────────────────────────────────────────────────
+  server.tool(
+    'feishu_wiki_add_member',
+    [
+      'Add a member or admin to a Wiki knowledge space.',
+      'Requires user OAuth with wiki:member:create or wiki:wiki scope.',
+      'IMPORTANT: The authorized user (the one who completed OAuth) MUST be an ADMIN of the target wiki space.',
+      'Only space admins can add or remove members.',
+      'Set via LARK_WIKI_SPACE environment variable for default space.',
+    ].join('\n'),
+    {
+      space_id:   z.string().describe('Knowledge space ID'),
+      member_type: z.enum(['openid', 'userid', 'email', 'openchat', 'opendepartmentid', 'unionid'])
+                      .default('openid').describe('Member ID type'),
+      member_id:   z.string().describe('Member ID (e.g. open_id: ou_xxx)'),
+      member_role: z.enum(['member', 'admin']).default('member').describe('Role: member or admin'),
+      need_notification: z.boolean().default(true).optional().describe('Whether to send notification'),
+    },
+    async ({ space_id, member_type, member_id, member_role, need_notification = true }) => withModuleAuth('docs', async () => {
+      const token = getUserToken();
+      const body = { member_type, member_id, member_role };
+
+      const res = await new Promise<any>((resolve, reject) => {
+        const payload = JSON.stringify(body);
+        const path = `/open-apis/wiki/v2/spaces/${space_id}/members?need_notification=${need_notification ? 'true' : 'false'}`;
+        const req = https.request(
+          { hostname: 'open.feishu.cn', path, method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
+          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+        );
+        req.on('error', reject);
+        req.write(payload);
+        req.end();
+      });
+
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return {
+        member_type: res.data?.member?.member_type,
+        member_id: res.data?.member?.member_id,
+        member_role: res.data?.member?.member_role,
+        type: res.data?.member?.type,
+      };
+    }),
+  );
+
+  // ── wiki list spaces ───────────────────────────────────────────────────────
+  server.tool(
+    'feishu_wiki_list_spaces',
+    [
+      'Get list of wiki spaces that the authorized user has access to.',
+      'Requires user OAuth with wiki:space:retrieve or wiki:wiki scope.',
+      'Uses user_access_token - only returns spaces that the authorized user can access.',
+      'This is a paginated API - use page_token from the previous response to fetch more results.',
+    ].join('\n'),
+    {
+      page_size: z.number().int().min(1).max(50).default(20).optional().describe('Page size, max 50'),
+      page_token: z.string().optional().describe('Page token from previous response for pagination'),
+    },
+    async ({ page_size = 20, page_token }) => withModuleAuth('docs', async () => {
+      const token = getUserToken();
+
+      const res = await new Promise<any>((resolve, reject) => {
+        let path = `/open-apis/wiki/v2/spaces?page_size=${page_size}`;
+        if (page_token) path += `&page_token=${encodeURIComponent(page_token)}`;
+
+        const req = https.request(
+          { hostname: 'open.feishu.cn', path, method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` } },
+          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return {
+        items: (res.data?.items ?? []).map((s: any) => ({
+          name: s.name,
+          description: s.description,
+          space_id: s.space_id,
+          space_type: s.space_type,
+          visibility: s.visibility,
+          open_sharing: s.open_sharing,
+        })),
+        page_token: res.data?.page_token,
+        has_more: res.data?.has_more,
+      };
+    }),
+  );
+
+  // ── wiki get space info ───────────────────────────────────────────────────
+  server.tool(
+    'feishu_wiki_get_space_user',
+    [
+      'Get detailed information about a specific wiki space by space_id.',
+      'Requires user OAuth with wiki:space:read or wiki:wiki scope.',
+      'Uses user_access_token - the authorized user must be a member or admin of the space.',
+      'Set via LARK_WIKI_SPACE environment variable for default space.',
+    ].join('\n'),
+    {
+      space_id: z.string().describe('Knowledge space ID'),
+      lang: z.enum(['zh', 'id', 'de', 'en', 'es', 'fr', 'it', 'pt', 'vi', 'ru', 'hi', 'th', 'ko', 'ja', 'zh-HK', 'zh-TW'])
+                .default('zh').optional().describe('Language for my_library space name display'),
+    },
+    async ({ space_id, lang = 'zh' }) => withModuleAuth('docs', async () => {
+      const token = getUserToken();
+
+      const res = await new Promise<any>((resolve, reject) => {
+        const path = `/open-apis/wiki/v2/spaces/${space_id}?lang=${lang}`;
+        const req = https.request(
+          { hostname: 'open.feishu.cn', path, method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` } },
+          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return {
+        name: res.data?.space?.name,
+        description: res.data?.space?.description,
+        space_id: res.data?.space?.space_id,
+        space_type: res.data?.space?.space_type,
+        visibility: res.data?.space?.visibility,
+        open_sharing: res.data?.space?.open_sharing,
+      };
+    }),
+  );
+
+  // ── wiki get space info (tenant token) ─────────────────────────────────────
+  server.tool(
+    'feishu_wiki_get_space_tenant',
+    [
+      'Get detailed information about a specific wiki space by space_id.',
+      'Uses tenant_access_token (app-level auth) - no user OAuth required.',
+      'IMPORTANT: The bot/app itself must be a member or admin of the target wiki space.',
+      'Set via LARK_WIKI_SPACE environment variable for default space.',
+    ].join('\n'),
+    {
+      space_id: z.string().describe('Knowledge space ID'),
+      lang: z.enum(['zh', 'id', 'de', 'en', 'es', 'fr', 'it', 'pt', 'vi', 'ru', 'hi', 'th', 'ko', 'ja', 'zh-HK', 'zh-TW'])
+                .default('zh').optional().describe('Language for my_library space name display'),
+    },
+    async ({ space_id, lang = 'zh' }) => withAuth(async () => {
+      const appId = process.env.LARK_APP_ID;
+      const appSecret = process.env.LARK_APP_SECRET;
+      if (!appId || !appSecret) throw new Error('LARK_APP_ID and LARK_APP_SECRET must be set');
+      const token = await getTenantAccessToken(appId, appSecret);
+
+      const res = await new Promise<any>((resolve, reject) => {
+        const path = `/open-apis/wiki/v2/spaces/${space_id}?lang=${lang}`;
+        const req = https.request(
+          { hostname: 'open.feishu.cn', path, method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` } },
+          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return {
+        name: res.data?.space?.name,
+        description: res.data?.space?.description,
+        space_id: res.data?.space?.space_id,
+        space_type: res.data?.space?.space_type,
+        visibility: res.data?.space?.visibility,
+        open_sharing: res.data?.space?.open_sharing,
+      };
+    }),
+  );
+
+  // ── wiki create space ──────────────────────────────────────────────────────
+  server.tool(
+    'feishu_wiki_create_space',
+    [
+      'Create a new wiki knowledge space.',
+      'Requires user OAuth with wiki:space:write_only or wiki:wiki scope.',
+      'NOTE: This API does NOT support tenant access token - only user_access_token.',
+      'IMPORTANT: After creating a space, immediately call feishu_wiki_add_member to add your bot/app as an admin. This is required for tenant token operations to work on the new space. Use feishu_people_search to find your bot/app open_id first.',
+    ].join('\n'),
+    {
+      name: z.string().describe('Knowledge space name'),
+      description: z.string().default('').optional().describe('Knowledge space description'),
+      open_sharing: z.enum(['open', 'closed']).default('closed').optional().describe('Sharing status: open or closed'),
+    },
+    async ({ name, description = '', open_sharing = 'closed' }) => withModuleAuth('docs', async () => {
+      const token = getUserToken();
+      const body: any = { name, description, open_sharing };
+
+      const res = await new Promise<any>((resolve, reject) => {
+        const payload = JSON.stringify(body);
+        const req = https.request(
+          { hostname: 'open.feishu.cn', path: '/open-apis/wiki/v2/spaces', method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
+          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+        );
+        req.on('error', reject);
+        req.write(payload);
+        req.end();
+      });
+
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return {
+        name: res.data?.space?.name,
+        description: res.data?.space?.description,
+        space_id: res.data?.space?.space_id,
+        space_type: res.data?.space?.space_type,
+        visibility: res.data?.space?.visibility,
+        open_sharing: res.data?.space?.open_sharing,
+      };
+    }),
+  );
+
+  // ── wiki list members (user token) ─────────────────────────────────────────
+  server.tool(
+    'feishu_wiki_list_members_user',
+    [
+      'Get list of members and admins of a wiki knowledge space.',
+      'Requires user OAuth with wiki:member:retrieve or wiki:wiki scope.',
+      'Uses user_access_token.',
+      'This is a paginated API - use page_token from the previous response to fetch more results.',
+      'Set via LARK_WIKI_SPACE environment variable for default space.',
+    ].join('\n'),
+    {
+      space_id: z.string().describe('Knowledge space ID'),
+      page_size: z.number().int().min(1).max(50).default(20).optional().describe('Page size, max 50'),
+      page_token: z.string().optional().describe('Page token from previous response for pagination'),
+    },
+    async ({ space_id, page_size = 20, page_token }) => withModuleAuth('docs', async () => {
+      const token = getUserToken();
+
+      const res = await new Promise<any>((resolve, reject) => {
+        let path = `/open-apis/wiki/v2/spaces/${space_id}/members?page_size=${page_size}`;
+        if (page_token) path += `&page_token=${encodeURIComponent(page_token)}`;
+
+        const req = https.request(
+          { hostname: 'open.feishu.cn', path, method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` } },
+          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return {
+        members: (res.data?.members ?? []).map((m: any) => ({
+          member_type: m.member_type,
+          member_id: m.member_id,
+          member_role: m.member_role,
+          type: m.type,
+        })),
+        page_token: res.data?.page_token,
+        has_more: res.data?.has_more,
+      };
+    }),
+  );
+
+  // ── wiki list members (tenant token) ───────────────────────────────────────
+  server.tool(
+    'feishu_wiki_list_members_tenant',
+    [
+      'Get list of members and admins of a wiki knowledge space.',
+      'Uses tenant_access_token (app-level auth) - no user OAuth required.',
+      'NOTE: The bot/app itself must be a member or admin of the target wiki space.',
+      'This is a paginated API - use page_token from the previous response to fetch more results.',
+      'Set via LARK_WIKI_SPACE environment variable for default space.',
+    ].join('\n'),
+    {
+      space_id: z.string().describe('Knowledge space ID'),
+      page_size: z.number().int().min(1).max(50).default(20).optional().describe('Page size, max 50'),
+      page_token: z.string().optional().describe('Page token from previous response for pagination'),
+    },
+    async ({ space_id, page_size = 20, page_token }) => withAuth(async () => {
+      const appId = process.env.LARK_APP_ID;
+      const appSecret = process.env.LARK_APP_SECRET;
+      if (!appId || !appSecret) throw new Error('LARK_APP_ID and LARK_APP_SECRET must be set');
+      const token = await getTenantAccessToken(appId, appSecret);
+
+      const res = await new Promise<any>((resolve, reject) => {
+        let path = `/open-apis/wiki/v2/spaces/${space_id}/members?page_size=${page_size}`;
+        if (page_token) path += `&page_token=${encodeURIComponent(page_token)}`;
+
+        const req = https.request(
+          { hostname: 'open.feishu.cn', path, method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` } },
+          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return {
+        members: (res.data?.members ?? []).map((m: any) => ({
+          member_type: m.member_type,
+          member_id: m.member_id,
+          member_role: m.member_role,
+        })),
+        page_token: res.data?.page_token,
+        has_more: res.data?.has_more,
+      };
     }),
   );
 }

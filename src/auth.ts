@@ -46,9 +46,12 @@ export const MODULE_SCOPES: Record<string, string[]> = {
     'drive:drive.metadata:readonly', 'drive:file:download', 'drive:file:upload',
     'docs:document:export', 'docs:document.media:download', 'docs:document.media:upload', 'docs:document:copy',
     // 'docs:document.comment:create', 'docs:document.comment:read', 'docs:document.comment:update', // not yet implemented
+    // Wiki scopes - 来自完整权限列表
+    'wiki:member:create',
     'wiki:node:copy', 'wiki:node:create', 'wiki:node:move',
     'wiki:node:read', 'wiki:node:retrieve',
     'wiki:space:read', 'wiki:space:retrieve', 'wiki:space:write_only',
+    'wiki:wiki',
   ],
   // people uses TAT — no OAuth needed
   // bitable: not yet implemented

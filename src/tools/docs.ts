@@ -790,4 +790,313 @@ export function registerDocTools(server: McpServer) {
       };
     }),
   );
+
+  // ── wiki create node (tenant token) ──────────────────────────────────────
+  server.tool(
+    'feishu_wiki_create_node_tenant',
+    [
+      'Create a node in a Wiki knowledge space.',
+      'Uses tenant_access_token - no user OAuth required.',
+      'NOTE: The bot/app itself must have edit permission on the parent node.',
+      'obj_type options: docx, sheet, mindnote, bitable, file, slides.',
+      'node_type options: origin (document), shortcut (shortcut).',
+    ].join('\n'),
+    {
+      space_id: z.string().describe('Knowledge space ID'),
+      obj_type: z.enum(['docx', 'sheet', 'mindnote', 'bitable', 'file', 'slides']).describe('Document type'),
+      parent_node_token: z.string().optional().describe('Parent node token. Omit for root level.'),
+      node_type: z.enum(['origin', 'shortcut']).describe('Node type: origin (document) or shortcut'),
+      origin_node_token: z.string().optional().describe('Origin node token for shortcuts'),
+      title: z.string().optional().describe('Document title'),
+    },
+    async ({ space_id, obj_type, parent_node_token, node_type, origin_node_token, title }) => withAuth(async () => {
+      const appId = process.env.LARK_APP_ID;
+      const appSecret = process.env.LARK_APP_SECRET;
+      if (!appId || !appSecret) throw new Error('LARK_APP_ID and LARK_APP_SECRET must be set');
+      const token = await getTenantAccessToken(appId, appSecret);
+
+      const body: any = { obj_type, node_type };
+      if (parent_node_token) body.parent_node_token = parent_node_token;
+      if (origin_node_token) body.origin_node_token = origin_node_token;
+      if (title) body.title = title;
+
+      const res = await new Promise<any>((resolve, reject) => {
+        const payload = JSON.stringify(body);
+        const req = https.request(
+          { hostname: 'open.feishu.cn', path: `/open-apis/wiki/v2/spaces/${space_id}/nodes`, method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
+          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+        );
+        req.on('error', reject);
+        req.write(payload);
+        req.end();
+      });
+
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return {
+        space_id: res.data?.node?.space_id,
+        node_token: res.data?.node?.node_token,
+        obj_token: res.data?.node?.obj_token,
+        obj_type: res.data?.node?.obj_type,
+        parent_node_token: res.data?.node?.parent_node_token,
+        node_type: res.data?.node?.node_type,
+        origin_node_token: res.data?.node?.origin_node_token,
+        origin_space_id: res.data?.node?.origin_space_id,
+        has_child: res.data?.node?.has_child,
+        title: res.data?.node?.title,
+        node_create_time: res.data?.node?.node_create_time,
+        node_creator: res.data?.node?.node_creator,
+      };
+    }),
+  );
+
+  // ── wiki get node info (tenant token) ────────────────────────────────────
+  server.tool(
+    'feishu_wiki_get_node_tenant',
+    [
+      'Get detailed information about a wiki node.',
+      'Uses tenant_access_token - no user OAuth required.',
+      'Use node token or document token with obj_type specified.',
+    ].join('\n'),
+    {
+      token: z.string().describe('Wiki node token or document token'),
+      obj_type: z.enum(['doc', 'docx', 'sheet', 'mindnote', 'bitable', 'file', 'slides', 'wiki']).default('wiki').optional().describe('Document type, default: wiki'),
+    },
+    async ({ token, obj_type = 'wiki' }) => withAuth(async () => {
+      const appId = process.env.LARK_APP_ID;
+      const appSecret = process.env.LARK_APP_SECRET;
+      if (!appId || !appSecret) throw new Error('LARK_APP_ID and LARK_APP_SECRET must be set');
+      const accessToken = await getTenantAccessToken(appId, appSecret);
+
+      const res = await new Promise<any>((resolve, reject) => {
+        const path = `/open-apis/wiki/v2/spaces/get_node?token=${encodeURIComponent(token)}&obj_type=${obj_type}`;
+        const req = https.request(
+          { hostname: 'open.feishu.cn', path, method: 'GET',
+            headers: { 'Authorization': `Bearer ${accessToken}` } },
+          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return {
+        space_id: res.data?.node?.space_id,
+        node_token: res.data?.node?.node_token,
+        obj_token: res.data?.node?.obj_token,
+        obj_type: res.data?.node?.obj_type,
+        parent_node_token: res.data?.node?.parent_node_token,
+        node_type: res.data?.node?.node_type,
+        origin_node_token: res.data?.node?.origin_node_token,
+        origin_space_id: res.data?.node?.origin_space_id,
+        has_child: res.data?.node?.has_child,
+        title: res.data?.node?.title,
+        obj_create_time: res.data?.node?.obj_create_time,
+        obj_edit_time: res.data?.node?.obj_edit_time,
+        node_create_time: res.data?.node?.node_create_time,
+        creator: res.data?.node?.creator,
+        owner: res.data?.node?.owner,
+        node_creator: res.data?.node?.node_creator,
+      };
+    }),
+  );
+
+  // ── wiki list child nodes (tenant token) ─────────────────────────────────
+  server.tool(
+    'feishu_wiki_list_nodes_tenant',
+    [
+      'List child nodes of a wiki space or parent node.',
+      'Uses tenant_access_token - no user OAuth required.',
+      'Pagination supported via page_token.',
+    ].join('\n'),
+    {
+      space_id: z.string().describe('Knowledge space ID'),
+      page_size: z.number().int().min(1).max(50).default(20).optional().describe('Page size, max 50'),
+      page_token: z.string().optional().describe('Page token for pagination'),
+      parent_node_token: z.string().optional().describe('Parent node token, omit for root level'),
+    },
+    async ({ space_id, page_size = 20, page_token, parent_node_token }) => withAuth(async () => {
+      const appId = process.env.LARK_APP_ID;
+      const appSecret = process.env.LARK_APP_SECRET;
+      if (!appId || !appSecret) throw new Error('LARK_APP_ID and LARK_APP_SECRET must be set');
+      const accessToken = await getTenantAccessToken(appId, appSecret);
+
+      const res = await new Promise<any>((resolve, reject) => {
+        let path = `/open-apis/wiki/v2/spaces/${space_id}/nodes?page_size=${page_size}`;
+        if (page_token) path += `&page_token=${encodeURIComponent(page_token)}`;
+        if (parent_node_token) path += `&parent_node_token=${encodeURIComponent(parent_node_token)}`;
+
+        const req = https.request(
+          { hostname: 'open.feishu.cn', path, method: 'GET',
+            headers: { 'Authorization': `Bearer ${accessToken}` } },
+          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return {
+        items: (res.data?.items ?? []).map((n: any) => ({
+          space_id: n.space_id,
+          node_token: n.node_token,
+          obj_token: n.obj_token,
+          obj_type: n.obj_type,
+          parent_node_token: n.parent_node_token,
+          node_type: n.node_type,
+          origin_node_token: n.origin_node_token,
+          origin_space_id: n.origin_space_id,
+          has_child: n.has_child,
+          title: n.title,
+          node_creator: n.node_creator,
+        })),
+        page_token: res.data?.page_token,
+        has_more: res.data?.has_more,
+      };
+    }),
+  );
+
+  // ── wiki move node (tenant token) ───────────────────────────────────────
+  server.tool(
+    'feishu_wiki_move_node_tenant',
+    [
+      'Move a wiki node to a new location within the same space or across spaces.',
+      'Uses tenant_access_token - no user OAuth required.',
+      'If node has children, all children will be moved together.',
+    ].join('\n'),
+    {
+      space_id: z.string().describe('Current knowledge space ID of the node'),
+      node_token: z.string().describe('Token of the node to move'),
+      target_parent_token: z.string().optional().describe('Target parent node token, omit for root level'),
+      target_space_id: z.string().optional().describe('Target knowledge space ID (for cross-space move)'),
+    },
+    async ({ space_id, node_token, target_parent_token, target_space_id }) => withAuth(async () => {
+      const appId = process.env.LARK_APP_ID;
+      const appSecret = process.env.LARK_APP_SECRET;
+      if (!appId || !appSecret) throw new Error('LARK_APP_ID and LARK_APP_SECRET must be set');
+      const accessToken = await getTenantAccessToken(appId, appSecret);
+
+      const body: any = {};
+      if (target_parent_token) body.target_parent_token = target_parent_token;
+      if (target_space_id) body.target_space_id = target_space_id;
+
+      const res = await new Promise<any>((resolve, reject) => {
+        const payload = JSON.stringify(body);
+        const req = https.request(
+          { hostname: 'open.feishu.cn', path: `/open-apis/wiki/v2/spaces/${space_id}/nodes/${node_token}/move`, method: 'POST',
+            headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
+          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+        );
+        req.on('error', reject);
+        req.write(payload);
+        req.end();
+      });
+
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return {
+        space_id: res.data?.node?.space_id,
+        node_token: res.data?.node?.node_token,
+        obj_token: res.data?.node?.obj_token,
+        obj_type: res.data?.node?.obj_type,
+        parent_node_token: res.data?.node?.parent_node_token,
+        node_type: res.data?.node?.node_type,
+        origin_node_token: res.data?.node?.origin_node_token,
+        origin_space_id: res.data?.node?.origin_space_id,
+        has_child: res.data?.node?.has_child,
+        title: res.data?.node?.title,
+        node_creator: res.data?.node?.node_creator,
+      };
+    }),
+  );
+
+  // ── wiki update node title (tenant token) ──────────────────────────────
+  server.tool(
+    'feishu_wiki_update_title_tenant',
+    [
+      'Update the title of a wiki node.',
+      'Uses tenant_access_token - no user OAuth required.',
+      'Only supports doc, docx, and shortcut node types.',
+    ].join('\n'),
+    {
+      space_id: z.string().describe('Knowledge space ID'),
+      node_token: z.string().describe('Token of the node to update'),
+      title: z.string().describe('New title for the node'),
+    },
+    async ({ space_id, node_token, title }) => withAuth(async () => {
+      const appId = process.env.LARK_APP_ID;
+      const appSecret = process.env.LARK_APP_SECRET;
+      if (!appId || !appSecret) throw new Error('LARK_APP_ID and LARK_APP_SECRET must be set');
+      const accessToken = await getTenantAccessToken(appId, appSecret);
+
+      const res = await new Promise<any>((resolve, reject) => {
+        const payload = JSON.stringify({ title });
+        const req = https.request(
+          { hostname: 'open.feishu.cn', path: `/open-apis/wiki/v2/spaces/${space_id}/nodes/${node_token}/update_title`, method: 'POST',
+            headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
+          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+        );
+        req.on('error', reject);
+        req.write(payload);
+        req.end();
+      });
+
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return { success: true };
+    }),
+  );
+
+  // ── wiki copy node (tenant token) ───────────────────────────────────────
+  server.tool(
+    'feishu_wiki_copy_node_tenant',
+    [
+      'Create a copy of a wiki node at a specified location.',
+      'Uses tenant_access_token - no user OAuth required.',
+      'Either target_parent_token or target_space_id (or both) must be provided.',
+    ].join('\n'),
+    {
+      space_id: z.string().describe('Source knowledge space ID'),
+      node_token: z.string().describe('Token of the node to copy'),
+      target_parent_token: z.string().optional().describe('Target parent node token'),
+      target_space_id: z.string().optional().describe('Target knowledge space ID'),
+      title: z.string().optional().describe('New title for the copied node. If omitted, original title is used. If empty string, title is empty.'),
+    },
+    async ({ space_id, node_token, target_parent_token, target_space_id, title }) => withAuth(async () => {
+      const appId = process.env.LARK_APP_ID;
+      const appSecret = process.env.LARK_APP_SECRET;
+      if (!appId || !appSecret) throw new Error('LARK_APP_ID and LARK_APP_SECRET must be set');
+      const accessToken = await getTenantAccessToken(appId, appSecret);
+
+      const body: any = {};
+      if (target_parent_token !== undefined) body.target_parent_token = target_parent_token;
+      if (target_space_id !== undefined) body.target_space_id = target_space_id;
+      if (title !== undefined) body.title = title;
+
+      const res = await new Promise<any>((resolve, reject) => {
+        const payload = JSON.stringify(body);
+        const req = https.request(
+          { hostname: 'open.feishu.cn', path: `/open-apis/wiki/v2/spaces/${space_id}/nodes/${node_token}/copy`, method: 'POST',
+            headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
+          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+        );
+        req.on('error', reject);
+        req.write(payload);
+        req.end();
+      });
+
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return {
+        space_id: res.data?.node?.space_id,
+        node_token: res.data?.node?.node_token,
+        obj_token: res.data?.node?.obj_token,
+        obj_type: res.data?.node?.obj_type,
+        parent_node_token: res.data?.node?.parent_node_token,
+        node_type: res.data?.node?.node_type,
+        origin_node_token: res.data?.node?.origin_node_token,
+        origin_space_id: res.data?.node?.origin_space_id,
+        has_child: res.data?.node?.has_child,
+        title: res.data?.node?.title,
+        node_creator: res.data?.node?.node_creator,
+      };
+    }),
+  );
 }

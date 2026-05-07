@@ -27,6 +27,202 @@ function larkPost(path: string, body: any, token: string): Promise<any> {
   });
 }
 
+// Extract order number from block content (ORDER:xxx format)
+function extractOrderFromBlock(block: any): number | null {
+  const blockTypes = ['text', 'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6', 'quote', 'code'];
+  for (const type of blockTypes) {
+    if (block[type]?.elements) {
+      for (const elem of block[type].elements) {
+        if (elem.text_run?.content) {
+          const match = elem.text_run.content.match(/ORDER:(\d+)/);
+          if (match) return parseInt(match[1], 10);
+        }
+      }
+    }
+  }
+  return null;
+}
+
+// Remove ORDER:xxx prefix from block content
+function removeOrderPrefixFromBlock(block: any): void {
+  const blockTypes = ['text', 'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6', 'quote', 'code'];
+  for (const type of blockTypes) {
+    if (block[type]?.elements) {
+      for (const elem of block[type].elements) {
+        if (elem.text_run?.content) {
+          elem.text_run.content = elem.text_run.content.replace(/ORDER:\d+\s*/, '');
+        }
+      }
+    }
+  }
+}
+
+// Reorder blocks: first try ORDER:xxx markers, fallback to first_level_block_ids order
+function reorderBlocksByOrderMarkers(firstLevelIds: string[], blocks: any[]): { first_level_block_ids: string[], blocks: any[] } {
+  // Check for ORDER:xxx markers
+  const orderMap = new Map<string, number>();
+  for (const block of blocks) {
+    const order = extractOrderFromBlock(block);
+    if (order !== null) {
+      orderMap.set(block.block_id, order);
+    }
+  }
+
+  let sortedBlocks: any[];
+
+  if (orderMap.size > 0) {
+    // Mode 1: Explicit ORDER:xxx markers found - use them for sorting
+    sortedBlocks = [...blocks].sort((a, b) => {
+      const orderA = orderMap.get(a.block_id) ?? Infinity;
+      const orderB = orderMap.get(b.block_id) ?? Infinity;
+      return orderA - orderB;
+    });
+    // Remove ORDER prefixes
+    for (const block of sortedBlocks) {
+      removeOrderPrefixFromBlock(block);
+    }
+  } else {
+    // Mode 2: Auto mode - reorder using firstLevelIds order (usually correct)
+    // First level blocks in firstLevelIds order, then nested blocks (order preserved)
+    const firstLevelBlocks: any[] = [];
+    const nestedBlocks: any[] = [];
+
+    // Collect all child block IDs
+    const allChildIds = new Set<string>();
+    for (const b of blocks) {
+      if (b.children && Array.isArray(b.children)) {
+        for (const childId of b.children) {
+          allChildIds.add(childId);
+        }
+      }
+    }
+
+    // Separate first level and nested blocks
+    for (const block of blocks) {
+      if (allChildIds.has(block.block_id)) {
+        nestedBlocks.push(block);
+      } else {
+        firstLevelBlocks.push(block);
+      }
+    }
+
+    // Sort first level blocks by their position in firstLevelIds
+    const sortedFirstLevel = firstLevelBlocks.sort((a, b) => {
+      const idxA = firstLevelIds.indexOf(a.block_id);
+      const idxB = firstLevelIds.indexOf(b.block_id);
+      return (idxA === -1 ? Infinity : idxA) - (idxB === -1 ? Infinity : idxB);
+    });
+
+    // Combine: sorted first level blocks + nested blocks (original order preserved)
+    sortedBlocks = [...sortedFirstLevel, ...nestedBlocks];
+  }
+
+  // Recalculate first level block IDs
+  const allChildIdsFinal = new Set<string>();
+  for (const b of sortedBlocks) {
+    if (b.children && Array.isArray(b.children)) {
+      for (const childId of b.children) {
+        allChildIdsFinal.add(childId);
+      }
+    }
+  }
+  const sortedFirstLevelIds = sortedBlocks
+    .filter((b: any) => !allChildIdsFinal.has(b.block_id))
+    .map((b: any) => b.block_id);
+
+  return { first_level_block_ids: sortedFirstLevelIds, blocks: sortedBlocks };
+}
+
+// ── Internal helper functions (not exposed as MCP tools) ──────────────────
+
+/**
+ * Convert Markdown or HTML content to Lark document blocks (internal use only)
+ */
+async function convertMarkdownToBlocks(
+  content_type: 'markdown' | 'html',
+  content: string,
+  auto_reorder: boolean = true
+): Promise<{ first_level_block_ids: string[], blocks: any[] }> {
+  const appId = process.env.LARK_APP_ID;
+  const appSecret = process.env.LARK_APP_SECRET;
+  if (!appId || !appSecret) throw new Error('LARK_APP_ID and LARK_APP_SECRET must be set');
+  const token = await getTenantAccessToken(appId, appSecret);
+  const res = await larkPost('/open-apis/docx/v1/documents/blocks/convert', { content_type, content }, token);
+  if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+
+  let firstLevelIds = res.data?.first_level_block_ids ?? [];
+  let blocks = res.data?.blocks ?? [];
+
+  if (auto_reorder) {
+    const reordered = reorderBlocksByOrderMarkers(firstLevelIds, blocks);
+    firstLevelIds = reordered.first_level_block_ids;
+    blocks = reordered.blocks;
+  }
+
+  return { first_level_block_ids: firstLevelIds, blocks };
+}
+
+/**
+ * Batch create nested blocks in a document (internal use only)
+ * Automatically removes merge_info from table blocks
+ */
+async function createNestedBlocks(
+  document_id: string,
+  parent_block_id: string,
+  blocks: any[]
+): Promise<{ created_blocks: any[], total_created: number }> {
+  const appId = process.env.LARK_APP_ID;
+  const appSecret = process.env.LARK_APP_SECRET;
+  if (!appId || !appSecret) throw new Error('LARK_APP_ID and LARK_APP_SECRET must be set');
+  const tenantToken = await getTenantAccessToken(appId, appSecret);
+
+  // Extract first level block ids (blocks that are not referenced as children by any other block)
+  const allChildIds = new Set<string>();
+  for (const b of blocks) {
+    if (b.children && Array.isArray(b.children)) {
+      for (const childId of b.children) {
+        allChildIds.add(childId);
+      }
+    }
+  }
+  const children_id = blocks
+    .filter((b: any) => !allChildIds.has(b.block_id))
+    .map((b: any) => b.block_id);
+
+  // Clean blocks: remove read-only fields but keep block_id and children array
+  const descendants = blocks.map((b: any) => {
+    // Keep block_id (temp_id) and children array - API uses children to build the tree
+    const { ...rest } = b;
+
+    // Remove read-only fields from table blocks
+    if (rest.table) {
+      const { cells, property, ...tableRest } = rest.table;
+      const { merge_info, ...propertyRest } = property || {};
+      rest.table = { ...tableRest, property: propertyRest };
+    }
+
+    return rest;
+  });
+
+  // For nested blocks, use the /descendant endpoint with children_id + descendants
+  const requestBody = {
+    children_id: children_id.length > 0 ? children_id : descendants.map((_: any, i: number) => `temp_${i}`),
+    descendants,
+    index: -1,
+  };
+
+  const res = await larkPost(
+    `/open-apis/docx/v1/documents/${document_id}/blocks/${parent_block_id}/descendant`,
+    requestBody,
+    tenantToken
+  );
+
+  if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+  const createdBlocks = res.data?.children ?? [];
+
+  return { created_blocks: createdBlocks, total_created: createdBlocks.length };
+}
+
 export function registerDocTools(server: McpServer) {
   // ── search ─────────────────────────────────────────────────────────────────
   server.tool(
@@ -284,8 +480,9 @@ export function registerDocTools(server: McpServer) {
       image_path:  z.string().optional().describe('For image blocks — absolute local file path to upload'),
       callout_emoji: z.string().optional().describe('For callout blocks — Unicode hex codepoint e.g. "1f4a1"=💡 "26a0"=⚠️ "2705"=✅ "1f525"=🔥 "1f4cc"=📌'),
       callout_bg:    z.number().int().min(1).max(7).optional().describe('For callout blocks — background color: 1=LightRed 2=LightOrange 3=LightYellow 4=LightGreen 5=LightBlue 6=LightPurple 7=LightGray'),
+      markdown:    z.string().optional().describe('Markdown content to append as multiple blocks. If provided, all other content params (text, type, etc.) are ignored.'),
     },
-    async ({ document_id, text = '', type = 'paragraph', bold, italic, inline_code, done, image_path, callout_emoji, callout_bg }) => withModuleAuth('docs', async () => {
+    async ({ document_id, text = '', type = 'paragraph', bold, italic, inline_code, done, image_path, callout_emoji, callout_bg, markdown }) => withModuleAuth('docs', async () => {
       const client = getLarkClient();
       const docRes = await (client as any).docx.v1.document.get(
         { path: { document_id } }, asUser(),
@@ -293,16 +490,117 @@ export function registerDocTools(server: McpServer) {
       if (docRes.code !== 0) throw new Error(`Get doc error ${docRes.code}: ${docRes.msg}`);
       const blockId = docRes.data?.document?.body?.block_id ?? document_id;
 
+      // ── Markdown batch mode: convert and bulk insert ──────────────────────
+      if (markdown !== undefined) {
+        // Step 1: Convert markdown to blocks with auto reorder
+        const { blocks: rawBlocks } = await convertMarkdownToBlocks('markdown', markdown, true);
+
+        // Step 2: Prepare blocks for insertion (clean read-only fields)
+        // Extract first level block ids
+        const allChildIds = new Set<string>();
+        for (const b of rawBlocks) {
+          if (b.children && Array.isArray(b.children)) {
+            for (const childId of b.children) {
+              allChildIds.add(childId);
+            }
+          }
+        }
+        const children_id = rawBlocks
+          .filter((b: any) => !allChildIds.has(b.block_id))
+          .map((b: any) => b.block_id);
+
+        // Clean blocks
+        const descendants = rawBlocks.map((b: any) => {
+          const { ...rest } = b;
+          if (rest.table) {
+            const { cells, property, ...tableRest } = rest.table;
+            const { merge_info, ...propertyRest } = property || {};
+            rest.table = { ...tableRest, property: propertyRest };
+          }
+          return rest;
+        });
+
+        const requestBody = {
+          children_id: children_id.length > 0 ? children_id : descendants.map((_: any, i: number) => `temp_${i}`),
+          descendants,
+          index: -1,
+        };
+
+        // Step 3: Try tenant token first, fallback to user token
+        const appId = process.env.LARK_APP_ID;
+        const appSecret = process.env.LARK_APP_SECRET;
+        if (!appId || !appSecret) throw new Error('LARK_APP_ID and LARK_APP_SECRET must be set');
+        const tenantToken = await getTenantAccessToken(appId, appSecret);
+
+        let useTenantToken = true;
+        let createdBlocks: any[] = [];
+
+        try {
+          const testRes = await larkPost(
+            `/open-apis/docx/v1/documents/${document_id}/blocks/${blockId}/descendant`,
+            requestBody,
+            tenantToken
+          );
+          if (testRes.code === 0) {
+            createdBlocks = testRes.data?.children ?? [];
+          } else {
+            useTenantToken = false;
+          }
+        } catch {
+          useTenantToken = false;
+        }
+
+        // Fallback to user token if tenant failed
+        if (!useTenantToken) {
+          const createRes = await (client as any).docx.v1.documentBlockDescendant.create({
+            path: { document_id, block_id: blockId },
+            params: { document_revision_id: -1 },
+            data: requestBody,
+          }, asUser());
+
+          if (createRes.code !== 0) throw new Error(`Create blocks error ${createRes.code}: ${createRes.msg}`);
+          createdBlocks = createRes.data?.children ?? [];
+        }
+
+        return { appended: true, blocks_created: createdBlocks.length, block_ids: createdBlocks.map((b: any) => b.block_id), used_tenant_token: useTenantToken };
+      }
+
       // ── image block (3-step) ─────────────────────────────────────────────────
       if (type === 'image') {
         if (!image_path) throw new Error('image_path is required for image blocks');
 
-        // Step 1: create empty image block → get Image BlockID
-        const createRes = await (client as any).docx.v1.documentBlockChildren.create({
-          path: { document_id, block_id: blockId },
-          params: { document_revision_id: -1 },
-          data: { children: [{ block_type: 27, image: {} }], index: -1 },
-        }, asUser());
+        const createBody = { children: [{ block_type: 27, image: {} }], index: -1 };
+        let useTenantToken = false;
+        let createRes: any = null;
+        const appId = process.env.LARK_APP_ID;
+        const appSecret = process.env.LARK_APP_SECRET;
+
+        // Step 1: create empty image block → try tenant token first, fallback to user token
+        if (appId && appSecret) {
+          try {
+            const tenantToken = await getTenantAccessToken(appId, appSecret);
+            const testRes = await larkPost(
+              `/open-apis/docx/v1/documents/${document_id}/blocks/${blockId}/children`,
+              createBody,
+              tenantToken
+            );
+            if (testRes.code === 0) {
+              createRes = testRes;
+              useTenantToken = true;
+            }
+          } catch {
+            // tenant failed, will try user token next
+          }
+        }
+
+        if (!createRes) {
+          createRes = await (client as any).docx.v1.documentBlockChildren.create({
+            path: { document_id, block_id: blockId },
+            params: { document_revision_id: -1 },
+            data: createBody,
+          }, asUser());
+        }
+
         const createCode = createRes?.code ?? createRes?.data?.code;
         if (createCode !== 0 && createCode !== undefined) throw new Error(`Create image block error ${createCode}: ${createRes?.msg ?? createRes?.data?.msg}`);
         const imageBlockId = createRes?.data?.children?.[0]?.block_id;
@@ -330,26 +628,57 @@ export function registerDocTools(server: McpServer) {
         }, asUser());
         const patchCode = patchRes?.code ?? patchRes?.data?.code;
         if (patchCode !== 0 && patchCode !== undefined) throw new Error(`Set image token error ${patchCode}: ${patchRes?.msg ?? patchRes?.data?.msg}`);
-        return { ok: true, document_id, appended: true, type: 'image' };
+        return { ok: true, document_id, appended: true, type: 'image', used_tenant_token: useTenantToken };
       }
 
       // ── equation block (paragraph with inline equation element) ─────────────
       if (type === 'equation') {
         const latex = text.endsWith('\n') ? text : text + '\n';
-        const res = await (client as any).docx.v1.documentBlockChildren.create({
-          path: { document_id, block_id: blockId },
-          params: { document_revision_id: -1 },
-          data: {
-            children: [{ block_type: 2, text: {
-              elements: [{ equation: { content: latex, text_element_style: {} } }],
-              style: { align: 1, folded: false },
-            }}],
-            index: -1,
-          },
-        }, asUser());
-        const resCode = res?.code ?? res?.data?.code;
-        if (resCode !== 0 && resCode !== undefined) throw new Error(`Lark API ${resCode}: ${res?.msg ?? res?.data?.msg}`);
-        return { ok: true, document_id, appended: true, type: 'equation' };
+        const requestBody = {
+          children: [{ block_type: 2, text: {
+            elements: [{ equation: { content: latex, text_element_style: {} } }],
+            style: { align: 1, folded: false },
+          }}],
+          index: -1,
+        };
+
+        // Try tenant token first, fallback to user token
+        const appId = process.env.LARK_APP_ID;
+        const appSecret = process.env.LARK_APP_SECRET;
+        let useTenantToken = true;
+        let result: any = null;
+
+        if (appId && appSecret) {
+          try {
+            const tenantToken = await getTenantAccessToken(appId, appSecret);
+            const testRes = await larkPost(
+              `/open-apis/docx/v1/documents/${document_id}/blocks/${blockId}/children`,
+              requestBody,
+              tenantToken
+            );
+            if (testRes.code === 0) {
+              result = testRes;
+            } else {
+              useTenantToken = false;
+            }
+          } catch {
+            useTenantToken = false;
+          }
+        } else {
+          useTenantToken = false;
+        }
+
+        if (!useTenantToken) {
+          result = await (client as any).docx.v1.documentBlockChildren.create({
+            path: { document_id, block_id: blockId },
+            params: { document_revision_id: -1 },
+            data: requestBody,
+          }, asUser());
+        }
+
+        const resCode = result?.code ?? result?.data?.code;
+        if (resCode !== 0 && resCode !== undefined) throw new Error(`Lark API ${resCode}: ${result?.msg ?? result?.data?.msg}`);
+        return { ok: true, document_id, appended: true, type: 'equation', used_tenant_token: useTenantToken };
       }
 
       // ── callout block (2-step container) ────────────────────────────────────
@@ -359,11 +688,39 @@ export function registerDocTools(server: McpServer) {
         const calloutData: any = {};
         if (callout_emoji) calloutData.emoji_id = callout_emoji;
         if (callout_bg)    calloutData.background_color = callout_bg;
-        const createRes = await (client as any).docx.v1.documentBlockChildren.create({
-          path: { document_id, block_id: blockId },
-          params: { document_revision_id: -1 },
-          data: { children: [{ block_type: 19, callout: calloutData }], index: -1 },
-        }, asUser());
+        const createBody = { children: [{ block_type: 19, callout: calloutData }], index: -1 };
+
+        // Try tenant token first, fallback to user token
+        const appId = process.env.LARK_APP_ID;
+        const appSecret = process.env.LARK_APP_SECRET;
+        let useTenantToken = false;
+        let createRes: any = null;
+
+        if (appId && appSecret) {
+          try {
+            const tenantToken = await getTenantAccessToken(appId, appSecret);
+            const testRes = await larkPost(
+              `/open-apis/docx/v1/documents/${document_id}/blocks/${blockId}/children`,
+              createBody,
+              tenantToken
+            );
+            if (testRes.code === 0) {
+              createRes = testRes;
+              useTenantToken = true;
+            }
+          } catch {
+            // tenant failed, will try user token next
+          }
+        }
+
+        if (!createRes) {
+          createRes = await (client as any).docx.v1.documentBlockChildren.create({
+            path: { document_id, block_id: blockId },
+            params: { document_revision_id: -1 },
+            data: createBody,
+          }, asUser());
+        }
+
         const createCode = createRes?.code ?? createRes?.data?.code;
         if (createCode !== 0 && createCode !== undefined) throw new Error(`Create callout error ${createCode}: ${createRes?.msg ?? createRes?.data?.msg}`);
         const calloutBlockId = createRes?.data?.children?.[0]?.block_id;
@@ -374,14 +731,41 @@ export function registerDocTools(server: McpServer) {
         if (bold)        inlineStyle.bold        = true;
         if (italic)      inlineStyle.italic      = true;
         if (inline_code) inlineStyle.inline_code = true;
-        const innerRes = await (client as any).docx.v1.documentBlockChildren.create({
-          path: { document_id, block_id: calloutBlockId },
-          params: { document_revision_id: -1 },
-          data: { children: [{ block_type: 2, text: { elements: [{ text_run: { content: text, text_element_style: inlineStyle } }], style: {} } }], index: 0 },
-        }, asUser());
+
+        const innerBody = { children: [{ block_type: 2, text: { elements: [{ text_run: { content: text, text_element_style: inlineStyle } }], style: {} } }], index: 0 };
+
+        // Try tenant token first for inner block too
+        let innerRes: any = null;
+        let innerUseTenant = false;
+
+        if (appId && appSecret) {
+          try {
+            const tenantToken = await getTenantAccessToken(appId, appSecret);
+            const testRes = await larkPost(
+              `/open-apis/docx/v1/documents/${document_id}/blocks/${calloutBlockId}/children`,
+              innerBody,
+              tenantToken
+            );
+            if (testRes.code === 0) {
+              innerRes = testRes;
+              innerUseTenant = true;
+            }
+          } catch {
+            // tenant failed, will try user token next
+          }
+        }
+
+        if (!innerRes) {
+          innerRes = await (client as any).docx.v1.documentBlockChildren.create({
+            path: { document_id, block_id: calloutBlockId },
+            params: { document_revision_id: -1 },
+            data: innerBody,
+          }, asUser());
+        }
+
         const innerCode = innerRes?.code ?? innerRes?.data?.code;
         if (innerCode !== 0 && innerCode !== undefined) throw new Error(`Insert callout text error ${innerCode}: ${innerRes?.msg ?? innerRes?.data?.msg}`);
-        return { ok: true, document_id, appended: true, type: 'callout' };
+        return { ok: true, document_id, appended: true, type: 'callout', used_tenant_token: useTenantToken };
       }
 
       // ── text-based blocks ────────────────────────────────────────────────────
@@ -428,59 +812,50 @@ export function registerDocTools(server: McpServer) {
         blockContent.style = { done: done ?? false };
       }
 
-      const res = await (client as any).docx.v1.documentBlockChildren.create({
-        path: { document_id, block_id: blockId },
-        params: { document_revision_id: -1 },
-        data: {
-          children: [{ block_type, [blockKey]: blockContent }],
-          index: -1,
-        },
-      }, asUser());
-      const resCode = res?.code ?? res?.data?.code;
-      if (resCode !== 0 && resCode !== undefined) throw new Error(`Lark API ${resCode}: ${res?.msg ?? res?.data?.msg} | block_type=${block_type} key=${blockKey}`);
-      return { ok: true, document_id, appended: true, type };
-    }),
-  );
-
-  // ── wiki create node ───────────────────────────────────────────────────────
-  server.tool(
-    'feishu_wiki_create_node',
-    [
-      'Create a node in a Wiki knowledge space.',
-      'obj_type options: document (default), folder.',
-      'Use folder type to create directory nodes for organizing API docs.',
-      'Set via LARK_WIKI_SPACE environment variable for default space.',
-    ].join('\n'),
-    {
-      space_id:        z.string().describe('Knowledge space ID'),
-      obj_type:        z.enum(['document', 'folder']).default('document').optional().describe('Node type: document or folder (directory)'),
-      parent_node_token: z.string().optional().describe('Parent node token. Omit for root level.'),
-      title:           z.string().describe('Node title'),
-    },
-    async ({ space_id, obj_type = 'document', parent_node_token, title }) => withModuleAuth('docs', async () => {
-      const token = getUserToken();
-      const body: any = { obj_type, title };
-      if (parent_node_token) body.parent_node_token = parent_node_token;
-
-      const res = await new Promise<any>((resolve, reject) => {
-        const payload = JSON.stringify(body);
-        const req = https.request(
-          { hostname: 'open.feishu.cn', path: `/open-apis/wiki/v2/spaces/${space_id}/nodes`, method: 'POST',
-            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
-          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
-        );
-        req.on('error', reject);
-        req.write(payload);
-        req.end();
-      });
-
-      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
-      return {
-        node_token: res.data?.node?.node_token,
-        obj_type: res.data?.node?.obj_type,
-        obj_token: res.data?.node?.obj_token,
-        title: res.data?.node?.title,
+      const requestBody = {
+        children: [{ block_type, [blockKey]: blockContent }],
+        index: -1,
       };
+
+      // Try tenant token first, fallback to user token
+      const appId = process.env.LARK_APP_ID;
+      const appSecret = process.env.LARK_APP_SECRET;
+      let useTenantToken = true;
+      let result: any = null;
+
+      if (appId && appSecret) {
+        try {
+          const tenantToken = await getTenantAccessToken(appId, appSecret);
+          const testRes = await larkPost(
+            `/open-apis/docx/v1/documents/${document_id}/blocks/${blockId}/children`,
+            requestBody,
+            tenantToken
+          );
+          if (testRes.code === 0) {
+            result = testRes;
+          } else {
+            useTenantToken = false;
+          }
+        } catch {
+          useTenantToken = false;
+        }
+      } else {
+        useTenantToken = false;
+      }
+
+      // Fallback to user token if tenant failed
+      if (!useTenantToken) {
+        const createRes = await (client as any).docx.v1.documentBlockChildren.create({
+          path: { document_id, block_id: blockId },
+          params: { document_revision_id: -1 },
+          data: requestBody,
+        }, asUser());
+        result = createRes;
+      }
+
+      const resCode = result?.code ?? result?.data?.code;
+      if (resCode !== 0 && resCode !== undefined) throw new Error(`Lark API ${resCode}: ${result?.msg ?? result?.data?.msg} | block_type=${block_type} key=${blockKey}`);
+      return { ok: true, document_id, appended: true, type, used_tenant_token: useTenantToken };
     }),
   );
 

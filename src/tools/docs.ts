@@ -27,6 +27,58 @@ function larkPost(path: string, body: any, token: string): Promise<any> {
   });
 }
 
+function larkGet(path: string, token: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      { hostname: 'open.feishu.cn', path, method: 'GET',
+        headers: { 'Authorization': `Bearer ${token}` } },
+      r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function larkPut(path: string, body: any, token: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body);
+    const req = https.request(
+      { hostname: 'open.feishu.cn', path, method: 'PUT',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
+      r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+    );
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+function larkDelete(path: string, token: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      { hostname: 'open.feishu.cn', path, method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` } },
+      r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function larkPatch(path: string, body: any, token: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body);
+    const req = https.request(
+      { hostname: 'open.feishu.cn', path, method: 'PATCH',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
+      r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
+    );
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
 // Extract order number from block content (ORDER:xxx format)
 function extractOrderFromBlock(block: any): number | null {
   const blockTypes = ['text', 'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6', 'quote', 'code'];
@@ -1472,6 +1524,242 @@ export function registerDocTools(server: McpServer) {
         title: res.data?.node?.title,
         node_creator: res.data?.node?.node_creator,
       };
+    }),
+  );
+}
+
+// ── Comment tools (tenant token only) ──────────────────────────────────────
+
+export function registerCommentTools(server: McpServer) {
+  const { LARK_APP_ID: appId, LARK_APP_SECRET: appSecret } = process.env;
+  if (!appId || !appSecret) return;
+
+  // 1. feishu_doc_comment_list - 获取云文档所有评论
+  server.tool(
+    'feishu_doc_comment_list',
+    [
+      'Get all comments from a document.',
+      'Uses tenant_access_token only - no user OAuth required.',
+    ].join('\n'),
+    {
+      file_token: z.string().describe('Document token'),
+      file_type: z.string().optional().describe('Document type: docx, doc, sheet, file, slides. Default: docx'),
+      is_whole: z.boolean().optional().describe('Whether to get whole document comments. Default: false'),
+      is_solved: z.boolean().optional().describe('Filter by solved status. Default: false'),
+      page_token: z.string().optional().describe('Page token for pagination'),
+      page_size: z.number().optional().describe('Page size. Default: 50, max: 100'),
+      need_reaction: z.boolean().optional().describe('Whether to include reaction data. Default: false'),
+    },
+    async ({ file_token, file_type = 'docx', is_whole, is_solved, page_token, page_size, need_reaction }) => withAuth(async () => {
+      const token = await getTenantAccessToken(appId, appSecret);
+      const params = new URLSearchParams({ file_type });
+      if (is_whole !== undefined) params.append('is_whole', String(is_whole));
+      if (is_solved !== undefined) params.append('is_solved', String(is_solved));
+      if (page_token) params.append('page_token', page_token);
+      if (page_size !== undefined) params.append('page_size', String(page_size));
+      if (need_reaction !== undefined) params.append('need_reaction', String(need_reaction));
+
+      const res = await larkGet(`/open-apis/drive/v1/files/${file_token}/comments?${params}`, token);
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return {
+        has_more: res.data?.has_more,
+        page_token: res.data?.page_token,
+        items: res.data?.items || [],
+        total_count: res.data?.items?.length || 0
+      };
+    }),
+  );
+
+  // 2. feishu_doc_comment_get_replies - 获取回复信息
+  server.tool(
+    'feishu_doc_comment_get_replies',
+    [
+      'Get replies for a specific comment.',
+      'Uses tenant_access_token only - no user OAuth required.',
+    ].join('\n'),
+    {
+      file_token: z.string().describe('Document token'),
+      comment_id: z.string().describe('Comment ID'),
+      file_type: z.string().optional().describe('Document type: docx, doc, sheet, file, slides. Default: docx'),
+      page_token: z.string().optional().describe('Page token for pagination'),
+      page_size: z.number().optional().describe('Page size. Default: 50, max: 100'),
+    },
+    async ({ file_token, comment_id, file_type = 'docx', page_token, page_size }) => withAuth(async () => {
+      const token = await getTenantAccessToken(appId, appSecret);
+      const params = new URLSearchParams({ file_type });
+      if (page_token) params.append('page_token', page_token);
+      if (page_size !== undefined) params.append('page_size', String(page_size));
+
+      const res = await larkGet(`/open-apis/drive/v1/files/${file_token}/comments/${comment_id}/replies?${params}`, token);
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return {
+        has_more: res.data?.has_more,
+        page_token: res.data?.page_token,
+        items: res.data?.items || [],
+        total_count: res.data?.items?.length || 0
+      };
+    }),
+  );
+
+  // 3. feishu_doc_comment_add_reply - 添加回复
+  server.tool(
+    'feishu_doc_comment_add_reply',
+    [
+      'Add a reply to a comment.',
+      'Uses tenant_access_token only - no user OAuth required.',
+    ].join('\n'),
+    {
+      file_token: z.string().describe('Document token'),
+      comment_id: z.string().describe('Comment ID'),
+      file_type: z.string().optional().describe('Document type: docx, doc, sheet, file, slides. Default: docx'),
+      text: z.string().describe('Reply text content'),
+    },
+    async ({ file_token, comment_id, file_type = 'docx', text }) => withAuth(async () => {
+      const token = await getTenantAccessToken(appId, appSecret);
+      const body = {
+        content: {
+          elements: [
+            { type: 'text_run', text_run: { text } }
+          ]
+        }
+      };
+
+      const res = await larkPost(`/open-apis/drive/v1/files/${file_token}/comments/${comment_id}/replies?file_type=${file_type}`, body, token);
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return { success: true, reply_id: res.data?.reply_id };
+    }),
+  );
+
+  // 4. feishu_doc_comment_update_reply - 更新回复的内容
+  server.tool(
+    'feishu_doc_comment_update_reply',
+    [
+      'Update reply content.',
+      'Uses tenant_access_token only - no user OAuth required.',
+    ].join('\n'),
+    {
+      file_token: z.string().describe('Document token'),
+      comment_id: z.string().describe('Comment ID'),
+      reply_id: z.string().describe('Reply ID'),
+      file_type: z.string().optional().describe('Document type: docx, doc, sheet, file, slides. Default: docx'),
+      text: z.string().describe('New reply text content'),
+    },
+    async ({ file_token, comment_id, reply_id, file_type = 'docx', text }) => withAuth(async () => {
+      const token = await getTenantAccessToken(appId, appSecret);
+      const body = {
+        content: {
+          elements: [
+            { type: 'text_run', text_run: { text } }
+          ]
+        }
+      };
+
+      const res = await larkPut(`/open-apis/drive/v1/files/${file_token}/comments/${comment_id}/replies/${reply_id}?file_type=${file_type}`, body, token);
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return { success: true };
+    }),
+  );
+
+  // 5. feishu_doc_comment_delete_reply - 删除回复
+  server.tool(
+    'feishu_doc_comment_delete_reply',
+    [
+      'Delete a reply.',
+      'Uses tenant_access_token only - no user OAuth required.',
+    ].join('\n'),
+    {
+      file_token: z.string().describe('Document token'),
+      comment_id: z.string().describe('Comment ID'),
+      reply_id: z.string().describe('Reply ID'),
+      file_type: z.string().optional().describe('Document type: docx, doc, sheet, file, slides. Default: docx'),
+    },
+    async ({ file_token, comment_id, reply_id, file_type = 'docx' }) => withAuth(async () => {
+      const token = await getTenantAccessToken(appId, appSecret);
+      const res = await larkDelete(`/open-apis/drive/v1/files/${file_token}/comments/${comment_id}/replies/${reply_id}?file_type=${file_type}`, token);
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return { success: true };
+    }),
+  );
+
+  // 6. feishu_doc_comment_resolve - 解决/恢复评论
+  server.tool(
+    'feishu_doc_comment_resolve',
+    [
+      'Resolve or unresolve a comment.',
+      'Uses tenant_access_token only - no user OAuth required.',
+    ].join('\n'),
+    {
+      file_token: z.string().describe('Document token'),
+      comment_id: z.string().describe('Comment ID'),
+      file_type: z.string().optional().describe('Document type: docx, doc, sheet, file, slides. Default: docx'),
+      resolved: z.boolean().describe('True to resolve, false to unresolve'),
+    },
+    async ({ file_token, comment_id, file_type = 'docx', resolved }) => withAuth(async () => {
+      const token = await getTenantAccessToken(appId, appSecret);
+      const body = { is_solved: resolved };
+
+      const res = await larkPatch(`/open-apis/drive/v1/files/${file_token}/comments/${comment_id}?file_type=${file_type}`, body, token);
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return { success: true, resolved };
+    }),
+  );
+
+  // 7. feishu_doc_comment_reaction - 添加/取消表情回应
+  server.tool(
+    'feishu_doc_comment_reaction',
+    [
+      'Add or remove emoji reaction to a comment.',
+      'Uses tenant_access_token only - no user OAuth required.',
+      'Reaction type: ANGRY, APPLAUSE, ATTENTION, AWESOME, BEAR, BEER, BETRAYED, BIGKISS, BLACKFACE, BLUBBER, BLUSH, BOMB, CAKE, CHUCKLE, CLAP, CLEAVER, COMFORT, CRAZY, CRY, CUCUMBER, DETERGENT, DIZZY, DONE, DONNOTGO, DROOL, DROWSY, DULL, DULLSTARE, EATING, EMBARRASSED, ENOUGH, ERROR, EYESCLOSED, FACEPALM, FINGERHEART, FISTBUMP, FOLLOWME, FROWN, GIFT, GLANCE, GOODJOB, HAMMER, HAUGHTY, HEADSET, HEART, HEARTBROKEN, HIGHFIVE, HUG, HUSKY, INNOCENTSMILE, JIAYI, JOYFUL, KISS, LAUGH, LIPS, LOL, LOOKDOWN, LOVE, MONEY, MUSCLE, NOSEPICK, OBSESSED, OK, PARTY, PETRIFIED, POOP, PRAISE, PROUD, PUKE, RAINBOWPUKE, ROSE, SALUTE, SCOWL, SHAKE, SHHH, SHOCKED, SHOWOFF, SHY, SICK, SILENT, SKULL, SLAP, SLEEP, SLIGHT, SMART, SMILE, SMIRK, SMOOCH, SMUG, SOB, SPEECHLESS, SPITBLOOD, STRIVE, SWEAT, TEARS, TEASE, TERROR, THANKS, THINKING, THUMBSUP, TOASTED, TONGUE, TRICK, UPPERLEFT, WAIL, WAVE, WELLDONE, WHAT, WHIMPER, WINK, WITTY, WOW, WRONGED, XBLUSH, YAWN, YEAH, FIREWORKS, BULL, CALF, AWESOMEN, 2021, CANDIEDHAWS, REDPACKET, FORTUNE, LUCK, FIRECRACKER, Yes, No, Get, LGTM, Lemon, EatingFood, Hundred, MinusOne, ThumbsDown, Fire, OKR, Drumstick, BubbleTea, Loudspeaker, Pin, Coffee, Alarm, Trophy, Music, Typing, Pepper, CheckMark, CrossMark.',
+    ].join('\n'),
+    {
+      file_token: z.string().describe('Document token'),
+      file_type: z.string().optional().describe('Document type: docx, doc, sheet, file, slides. Default: docx'),
+      reply_id: z.string().describe('Reply ID (not comment ID)'),
+      reaction_type: z.string().describe('Reaction type, e.g., "HEART", "THUMBSUP", "LIKE", "WOW"'),
+      action: z.enum(['add', 'delete']).describe('Action: add or delete reaction'),
+    },
+    async ({ file_token, file_type = 'docx', reply_id, reaction_type, action }) => withAuth(async () => {
+      const token = await getTenantAccessToken(appId, appSecret);
+      const body = { action, reply_id, reaction_type };
+
+      const res = await larkPost(`/open-apis/drive/v2/files/${file_token}/comments/reaction?file_type=${file_type}`, body, token);
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return { success: true, action, reaction_type };
+    }),
+  );
+
+  // 8. feishu_doc_comment_add_whole - 添加全文评论
+  server.tool(
+    'feishu_doc_comment_add_whole',
+    [
+      'Add a whole-document comment.',
+      'Uses tenant_access_token only - no user OAuth required.',
+    ].join('\n'),
+    {
+      file_token: z.string().describe('Document token'),
+      file_type: z.string().optional().describe('Document type: docx, doc. Default: docx'),
+      text: z.string().describe('Comment text content'),
+    },
+    async ({ file_token, file_type = 'docx', text }) => withAuth(async () => {
+      const token = await getTenantAccessToken(appId, appSecret);
+      const body = {
+        reply_list: {
+          replies: [
+            {
+              content: {
+                elements: [
+                  { type: 'text_run', text_run: { text } }
+                ]
+              }
+            }
+          ]
+        }
+      };
+
+      const res = await larkPost(`/open-apis/drive/v1/files/${file_token}/comments?file_type=${file_type}`, body, token);
+      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      return { success: true, comment_id: res.data?.comment_id };
     }),
   );
 }

@@ -1613,15 +1613,19 @@ export function registerCommentTools(server: McpServer) {
       comment_id: z.string().describe('Comment ID'),
       file_type: z.string().optional().describe('Document type: docx, doc, sheet, file, slides. Default: docx'),
       text: z.string().describe('Reply text content'),
+      at_open_id: z.string().optional().describe('Open ID of user to @mention'),
     },
-    async ({ file_token, comment_id, file_type = 'docx', text }) => withAuth(async () => {
+    async ({ file_token, comment_id, file_type = 'docx', text, at_open_id }) => withAuth(async () => {
       const token = await getTenantAccessToken(appId, appSecret);
+      const elements: any[] = [];
+      if (at_open_id) {
+        elements.push({ type: 'person', person: { user_id: at_open_id } });
+        elements.push({ type: 'text_run', text_run: { text: ` ${text}` } });
+      } else {
+        elements.push({ type: 'text_run', text_run: { text } });
+      }
       const body = {
-        content: {
-          elements: [
-            { type: 'text_run', text_run: { text } }
-          ]
-        }
+        content: { elements }
       };
 
       const res = await larkPost(`/open-apis/drive/v1/files/${file_token}/comments/${comment_id}/replies?file_type=${file_type}`, body, token);
@@ -1740,19 +1744,21 @@ export function registerCommentTools(server: McpServer) {
       file_token: z.string().describe('Document token'),
       file_type: z.string().optional().describe('Document type: docx, doc. Default: docx'),
       text: z.string().describe('Comment text content'),
+      at_open_id: z.string().optional().describe('Open ID of user to @mention'),
     },
-    async ({ file_token, file_type = 'docx', text }) => withAuth(async () => {
+    async ({ file_token, file_type = 'docx', text, at_open_id }) => withAuth(async () => {
       const token = await getTenantAccessToken(appId, appSecret);
+      const elements: any[] = [];
+      if (at_open_id) {
+        elements.push({ type: 'person', person: { user_id: at_open_id } });
+        elements.push({ type: 'text_run', text_run: { text: ` ${text}` } });
+      } else {
+        elements.push({ type: 'text_run', text_run: { text } });
+      }
       const body = {
         reply_list: {
           replies: [
-            {
-              content: {
-                elements: [
-                  { type: 'text_run', text_run: { text } }
-                ]
-              }
-            }
+            { content: { elements } }
           ]
         }
       };

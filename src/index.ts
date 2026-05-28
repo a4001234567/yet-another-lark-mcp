@@ -20,10 +20,13 @@
  *   LARK_TIMEZONE     (optional) Timezone for calendar/task times, default Asia/Shanghai
  */
 
+import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { initAuth, fetchOwnerOpenIdFromApp } from './auth.js';
-import { startWsClient } from './ws.js';
+import { startWsClient, setWsEnabled } from './ws.js';
 import { logToolCall } from './logger.js';
 import { registerAuthTools } from './tools/auth.js';
 import { registerPeopleTools } from './tools/people.js';
@@ -59,14 +62,53 @@ const server = new McpServer({
 // Load persisted token and schedule auto-refresh
 initAuth();
 
-// Attempt WebSocket long connection for real-time IM events.
-// Set LARK_NO_WATCH=1 to skip — useful for a send-only instance sharing the same app
-// with a separate watch-loop instance (avoids event delivery collisions).
+// Read cwd-local config — scoped to the directory where claude was invoked,
+// NOT inherited from parent directories (unlike .mcp.json env vars).
+// enableWatch must be explicitly true here; default is false (no long connection).
+// LARK_NO_WATCH=1 overrides as an emergency kill switch even if config says true.
+let localConfig: { enableWatch?: boolean } = {};
+try {
+  localConfig = JSON.parse(readFileSync(join(process.cwd(), '.lark-mcp.json'), 'utf8'));
+} catch {}
+
+// Acquire a per-APPID PID lockfile so only one MCP instance per app holds the WS connection.
+// Uses atomic O_CREAT|O_EXCL write; checks if the lock holder PID is still alive on conflict.
+function acquireWsLock(appId: string): boolean {
+  const dir = join(homedir(), '.config', 'lark-mcp');
+  mkdirSync(dir, { recursive: true });
+  const lockPath = join(dir, `${appId}-ws.lock`);
+  const myPid = String(process.pid);
+
+  const write = () => {
+    try { writeFileSync(lockPath, myPid, { flag: 'wx' }); return true; } catch { return false; }
+  };
+
+  if (write()) {
+    process.on('exit', () => { try { unlinkSync(lockPath); } catch {} });
+    return true;
+  }
+
+  // Lock exists — check if holder is still alive
+  try {
+    const pid = parseInt(readFileSync(lockPath, 'utf8').trim(), 10);
+    if (!isNaN(pid)) {
+      try { process.kill(pid, 0); return false; } catch { /* dead */ }
+    }
+    unlinkSync(lockPath);
+    if (write()) {
+      process.on('exit', () => { try { unlinkSync(lockPath); } catch {} });
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
 const appId = process.env.LARK_APP_ID;
 const appSecret = process.env.LARK_APP_SECRET;
 if (appId && appSecret) {
   fetchOwnerOpenIdFromApp(appId, appSecret).catch(() => { /* error logged inside */ });
-  if (!process.env.LARK_NO_WATCH) {
+  if (localConfig.enableWatch === true && !process.env.LARK_NO_WATCH && acquireWsLock(appId)) {
+    setWsEnabled();
     startWsClient(appId, appSecret).catch(() => { /* fallback handled inside */ });
   }
 }

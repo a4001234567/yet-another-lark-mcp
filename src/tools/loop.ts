@@ -17,6 +17,7 @@ import {
   getMessageQueue, drainCallbackQueue,
   getSchedules, createSchedule, deleteSchedule, drainFiredSchedules,
   registerProgress, getProgressState, updateProgress, removeProgress, consumeStopSignal,
+  wsEnabled,
 } from '../ws.js';
 import {
   registerCard, removeCard, drainExpiredCards,
@@ -74,8 +75,8 @@ async function patchCard(message_id: string, cardJson: object) {
 // ---------------------------------------------------------------------------
 
 export function registerLoopTools(server: McpServer) {
-  // ── watch ──────────────────────────────────────────────────────────────────
-  server.tool(
+  // ── watch ── only registered when WS long-connection is enabled ────────────
+  if (wsEnabled) server.tool(
     'feishu_im_watch',
     [
       'Wait for incoming Feishu events (messages, card callbacks, cron schedules). Blocking — do NOT call in parallel.',

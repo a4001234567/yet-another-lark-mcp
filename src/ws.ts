@@ -21,7 +21,7 @@ import { join } from 'path';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { lookupCard, removeCard, buildConfirmRespondedCard, buildFormSubmittedCard } from './card-registry.js';
 import { buildProgressCard, ProgressStep } from './cards/progress.js';
-import { logMessage, stderrLogger } from './logger.js';
+import { logMessage, logRawMessage, stderrLogger } from './logger.js';
 
 export type QueuedMessage = {
   message_id:  string;
@@ -237,8 +237,10 @@ const messageQueue: QueuedMessage[] = [];
 const callbackQueue: QueuedCallback[] = [];
 const MAX_QUEUE = 500;
 
-// let _wsActive = false;
-// export function isWsActive(): boolean { return _wsActive; } // TODO: delete after poll-removal confirmed stable
+/** True once startWsClient has been called (set before the async connect, so it's
+ *  readable by the time registerLoopTools runs). Used to gate feishu_im_watch registration. */
+export let wsEnabled = false;
+export function setWsEnabled(): void { wsEnabled = true; }
 
 export function getMessageQueue(): QueuedMessage[] { return messageQueue; }
 export function getCallbackQueue(): QueuedCallback[] { return callbackQueue; }
@@ -291,6 +293,37 @@ export async function startWsClient(appId: string, appSecret: string): Promise<v
       let content = msg.content;
       try { content = JSON.parse(content); } catch { /* leave as string */ }
 
+      // Expand merge_forward: fetch thread, filter forwarded messages (earlier than merge_forward itself),
+      // and format as a readable numbered list
+      if (msg.message_type === 'merge_forward') {
+        try {
+          const { getLarkClient: getC } = await import('./client.js');
+          const res = await (getC().im.message as any).get({ path: { message_id: msg.message_id } });
+          const mergeTs = parseInt(msg.create_time ?? '0', 10);
+          const lines: string[] = [];
+          let idx = 1;
+          for (const m of (res?.data?.items ?? [])) {
+            if (parseInt(m.create_time, 10) >= mergeTs) continue;
+            let body = m.body?.content ?? '';
+            try {
+              const parsed = JSON.parse(body);
+              if (m.msg_type === 'file' || m.msg_type === 'media') {
+                // Use the merge_forward message_id — fetch_resource requires the container message's ID
+                body = `[${m.msg_type} file_key=${parsed.file_key ?? '?'} name="${parsed.file_name ?? '?'}" message_id=${msg.message_id}]`;
+              } else if (m.msg_type === 'image') {
+                body = `[image image_key=${parsed.image_key ?? '?'} message_id=${msg.message_id}]`;
+              } else {
+                body = parsed.text ?? JSON.stringify(parsed);
+              }
+            } catch { /* leave as string */ }
+            lines.push(`[${idx++}] ${body}`);
+          }
+          content = lines.length > 0
+            ? `以下是转发的 ${lines.length} 条消息：\n${lines.join('\n')}`
+            : '（转发消息为空）';
+        } catch { /* leave original placeholder on failure */ }
+      }
+
       const queued: QueuedMessage = {
         message_id:  msg.message_id ?? '',
         sender_id:   data?.sender?.sender_id?.open_id ?? '',
@@ -304,6 +337,7 @@ export async function startWsClient(appId: string, appSecret: string): Promise<v
       messageQueue.push(queued);
       if (messageQueue.length > MAX_QUEUE) messageQueue.splice(0, messageQueue.length - MAX_QUEUE);
       logMessage({ from: queued.sender_id, chat_id: queued.chat_id, msg_type: queued.msg_type, content: queued.content });
+      logRawMessage(queued);
     },
 
     // eslint-disable-next-line @typescript-eslint/naming-convention

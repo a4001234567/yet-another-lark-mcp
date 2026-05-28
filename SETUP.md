@@ -47,8 +47,10 @@ Calendar, tasks, docs act on behalf of the user and require a one-time OAuth aut
    space:document:delete  space:document:move  space:document:retrieve
    drive:drive.metadata:readonly  drive:file:download  drive:file:upload
    docs:document:export  docs:document.media:download  docs:document.media:upload  docs:document:copy
+   wiki:member:create
    wiki:node:copy  wiki:node:create  wiki:node:move  wiki:node:read  wiki:node:retrieve
    wiki:space:read  wiki:space:retrieve  wiki:space:write_only
+   wiki:wiki
    ```
    **Always required**
    ```
@@ -116,6 +118,26 @@ Then add your credentials to `.claude/settings.json`:
   }
 }
 ```
+
+**Enable the watch loop:** Create `.lark-mcp.json` in the directory where you run Claude Code:
+
+```json
+{ "enableWatch": true }
+```
+
+Without this file, the server starts without a WebSocket connection and `feishu_im_watch` is not registered. The WS lock ensures only one MCP instance per App ID holds the connection — safe to have multiple Claude Code windows open.
+
+### OpenAI Codex
+
+Add the server to your Codex MCP config the same way as Claude Desktop (see INSTALL.md). Also create `.lark-mcp.json` with `{ "enableWatch": true }` as above.
+
+> **Critical — increase MCP tool timeout:**
+> Codex defaults to a 120-second MCP tool timeout. `feishu_im_watch` blocks for up to 6 hours. Without raising this limit the watch loop breaks every 2 minutes.
+>
+> Add to `~/.codex/config.json`:
+> ```json
+> { "mcpToolTimeout": 21600000 }
+> ```
 
 ### Claude Desktop
 

@@ -55,6 +55,35 @@ Then add the environment variables. In `.claude/settings.json` (or `settings.loc
 }
 ```
 
+### OpenAI Codex
+
+Add to your Codex MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "lark": {
+      "command": "npx",
+      "args": ["tsx", "/absolute/path/to/lark-mcp-server/src/index.ts"],
+      "env": {
+        "LARK_APP_ID": "cli_xxx",
+        "LARK_APP_SECRET": "your_secret",
+        "LARK_TIMEZONE": "Asia/Shanghai"
+      }
+    }
+  }
+}
+```
+
+> **Important — increase MCP tool timeout:**
+> Codex defaults to a 120-second timeout per MCP tool call. `feishu_im_watch` is a blocking long-poll that can run up to 6 hours. You must raise the timeout, or the watch loop will break every 2 minutes.
+>
+> In `~/.codex/config.json` (or your Codex project config), set:
+> ```json
+> { "mcpToolTimeout": 21600000 }
+> ```
+> (21 600 000 ms = 6 hours)
+
 ### Claude Desktop
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
@@ -82,7 +111,19 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 | `LARK_APP_ID` | Yes | — | App ID from Lark developer console (`cli_xxx`) |
 | `LARK_APP_SECRET` | Yes | — | App secret |
 | `LARK_TIMEZONE` | No | `Asia/Shanghai` | Timezone for date parsing and display |
-| `LARK_NO_WATCH` | No | — | Set to `1` to skip the WebSocket connection. Use this for a send-only instance running alongside a separate watch-loop instance on the same app. |
+| `LARK_NO_WATCH` | No | — | Set to `1` to skip the WebSocket connection. Emergency kill switch — disables the WS connection even if `.lark-mcp.json` says `enableWatch: true`. |
+
+### Enabling the WebSocket watch loop
+
+The WebSocket long connection (required for `feishu_im_watch`) must be explicitly enabled via a per-project config file. Create `.lark-mcp.json` **in the directory where you launch your AI client**:
+
+```json
+{ "enableWatch": true }
+```
+
+This file is scoped to that directory — it is not inherited from parent directories. Without it, the server starts without a WS connection and `feishu_im_watch` is not registered.
+
+**WS lock:** only one MCP server instance per App ID can hold the WebSocket connection at a time. If a second instance starts (e.g. a second Claude Code window using the same app), it detects the lock and skips the connection silently. This prevents duplicate message delivery. The lock file is at `~/.config/lark-mcp/<app_id>-ws.lock` and is removed automatically when the owning process exits.
 
 ---
 
@@ -162,6 +203,7 @@ docs:document:export
 docs:document.media:download
 docs:document.media:upload
 docs:document:copy
+wiki:member:create
 wiki:node:copy
 wiki:node:create
 wiki:node:move
@@ -170,6 +212,7 @@ wiki:node:retrieve
 wiki:space:read
 wiki:space:retrieve
 wiki:space:write_only
+wiki:wiki
 ```
 
 **Always required**

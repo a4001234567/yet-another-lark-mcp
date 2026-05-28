@@ -46,7 +46,6 @@ export const MODULE_SCOPES: Record<string, string[]> = {
     'drive:drive.metadata:readonly', 'drive:file:download', 'drive:file:upload',
     'docs:document:export', 'docs:document.media:download', 'docs:document.media:upload', 'docs:document:copy',
     // 'docs:document.comment:create', 'docs:document.comment:read', 'docs:document.comment:update', // not yet implemented
-    // Wiki scopes - 来自完整权限列表
     'wiki:member:create',
     'wiki:node:copy', 'wiki:node:create', 'wiki:node:move',
     'wiki:node:read', 'wiki:node:retrieve',
@@ -225,10 +224,24 @@ function post(path: string, body: Record<string, string>): Promise<any> {
 // Tenant access token (app-level, no user auth needed)
 // ---------------------------------------------------------------------------
 
+let _tatCache: { token: string; expires_at: number } | null = null;
+
 export async function getTenantAccessToken(appId: string, appSecret: string): Promise<string> {
   const res = await post('/open-apis/auth/v3/tenant_access_token/internal', { app_id: appId, app_secret: appSecret });
   if (res.code !== 0) throw new Error(`TAT error ${res.code}: ${res.msg}`);
   return res.tenant_access_token as string;
+}
+
+/** Cached TAT — fetches fresh only when within 60 s of expiry (2-hour TTL). */
+export async function getCachedTenantToken(): Promise<string> {
+  if (_tatCache && Date.now() < _tatCache.expires_at - 60_000) return _tatCache.token;
+  const appId     = process.env.LARK_APP_ID!;
+  const appSecret = process.env.LARK_APP_SECRET!;
+  if (!appId || !appSecret) throw new Error('LARK_APP_ID / LARK_APP_SECRET not set');
+  const token = await getTenantAccessToken(appId, appSecret);
+  _tatCache = { token, expires_at: Date.now() + 7_200_000 }; // 2-hour TTL
+  process.stderr.write('[lark-mcp] Tenant token refreshed\n');
+  return token;
 }
 
 function getJson(path: string, token: string): Promise<any> {

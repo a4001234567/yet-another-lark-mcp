@@ -4,7 +4,8 @@
  * 职责（越傻越对）：
  *   1. 持有一条飞书长连接，收应用能收到的所有消息 + 卡片回调
  *   2. 游标切批：每批 = 上次 flush 之后的所有新事件（batch 不是 queue）
- *   3. Agent 空闲时 spawn 一轮 claude -p --resume，把整批喂进去
+ *   3. Agent 空闲时跑一轮：默认 spawn 一个 claude -p --resume（每轮重载整段会话）；
+ *      BROKER_PERSISTENT=1 时改为常驻一个 claude、用 stream-json 把每批喂进去
  *   4. 定时 schedule 也在这儿触发（原本挂在 watch 的 tick 上）
  *
  * 不做：语义判断、摘要、会话路由（只有单会话）、把白咲自己发的回推。
@@ -16,7 +17,7 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 import { Cron } from 'croner';
 import { spawn } from 'child_process';
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, unlinkSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
@@ -51,6 +52,7 @@ const NAMES_FILE     = join(LOG_DIR, 'names.json');
 const SCHEDULES_DIR  = join(homedir(), '.config', 'lark-mcp');
 const SCHEDULES_FILE = join(SCHEDULES_DIR, 'schedules.json');
 const CARDS_FILE     = join(SCHEDULES_DIR, 'cards.json');
+const PERSIST_PID    = join(LOG_DIR, 'persist.pid');   // 常驻 claude 的 pid，供启动时清残留
 
 mkdirSync(LOG_DIR, { recursive: true });
 
@@ -405,7 +407,7 @@ function renderBatch(batch: BatchItem[]): string {
   return lines.join('\n');
 }
 
-function runTurn(batch: BatchItem[]): Promise<void> {
+function runTurnSpawn(batch: BatchItem[]): Promise<void> {
   const prompt = renderBatch(batch);
   log(`—— 起一轮，${batch.length} 条 ——`);
 
@@ -438,12 +440,263 @@ function runTurn(batch: BatchItem[]): Promise<void> {
   });
 }
 
+// ── 常驻驱动（BROKER_PERSISTENT=1 时启用）───────────────────────────────────
+// 与 runTurnSpawn 的区别：不再每轮 spawn + --resume 重载整段会话，而是常驻一个
+// claude 进程，用 stream-json 把每批事件当一条 user 消息喂进去，上下文留在进程内。
+// 进程崩了下次自动重拉（带上已捕获的 session id 续接）。
+
+const USE_PERSISTENT = process.env.BROKER_PERSISTENT === '1';
+// 常驻进程起手 resume SESSION_ID（即当前会话），上下文无缝接上；resume 会沿用同一个
+// session id，所以重启 broker 也一直挂在这条会话上，不必另存 id。
+let persistSessionId = process.env.BROKER_PERSISTENT_SEED || SESSION_ID;
+
+type Persistent = {
+  child: any;
+  sessionId: string;
+  resolveTurn: (() => void) | null;
+  currentBatch: BatchItem[] | null;   // 本轮事件；崩了用它找回话对象，别用共享变量（新事件一到会回错会话）
+  lastType: string | null;            // 最后一条输出的 type，卡死时记进日志便于回溯
+  buf: string;
+};
+
+let persist: Persistent | null = null;
+
+/** 轮次崩了别静默吞掉：回一句让缺月知道重发（常驻进程崩、写 stdin 失败都用它）。 */
+async function notifyTurnBroken(why: string, batch: BatchItem[] | null): Promise<void> {
+  const first = (batch ?? []).find((b: any) => b.kind === 'message' && b.sender_type === 'user') as any;
+  if (!first?.chat_id) return;
+  try {
+    const res: any = await client.im.message.create({
+      params: { receive_id_type: 'chat_id' },
+      data: {
+        receive_id: first.chat_id,
+        msg_type: 'text',
+        content: JSON.stringify({ text: `这轮断了（${why}），麻烦重发一下。` }),
+      },
+    });
+    if (res.code !== 0) log(`断轮回推失败 ${res.code}: ${res.msg}`);
+  } catch (e: any) { log(`断轮回推异常: ${e?.message ?? e}`); }
+}
+
+// ── 看门狗：盯「静默」而不是整轮时长 ────────────────────────────────────────
+// 长任务会一直吐字，按总时长判会误杀；只在「最后一条输出之后 N 毫秒没新字节」时判卡死。
+// 触发后杀掉常驻进程、置空、回一句让缺月重发，下一轮自然重拉新进程。
+const WATCHDOG_MS = Number(process.env.BROKER_WATCHDOG_MS || 10 * 60_000);   // 默认 10 分钟：别把十几分钟不吐字的编译／apt 当卡死
+let watchdogTimer: NodeJS.Timeout | null = null;
+
+function clearWatchdog(): void {
+  if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+}
+
+/** 每来一段输出就重置静默计时；没有轮次在跑就不盯。 */
+function bumpWatchdog(): void {
+  if (!persist?.resolveTurn) return;
+  clearWatchdog();
+  watchdogTimer = setTimeout(tripWatchdog, WATCHDOG_MS);
+  watchdogTimer.unref?.();             // 别拖住进程退出
+}
+
+function tripWatchdog(): void {
+  const p = persist;
+  if (!p) return;
+  clearWatchdog();
+  const r = p.resolveTurn; p.resolveTurn = null;
+  const batch = p.currentBatch; p.currentBatch = null;
+  log(`看门狗：${WATCHDOG_MS}ms 没新输出（最后一条输出 type=${p.lastType ?? '无'}），判卡死——杀常驻进程，下轮重拉`);
+  if (persist === p) persist = null;
+  clearPersistPid(p.child.pid);
+  try { p.child.kill('SIGKILL'); } catch { /* ignore */ }
+  if (r) { r(); void notifyTurnBroken('进程长时间没响应，卡住了', batch); }
+  if (shutdownRequested) doShutdown();
+}
+
+/** 记下常驻 claude 的 pid；broker 被硬杀时它攥着会话不放，下次启动靠这个 pid 清掉。 */
+function writePersistPid(pid: number): void {
+  try { writeFileSync(PERSIST_PID, String(pid), 'utf-8'); } catch { /* best-effort */ }
+}
+
+/** 只在 pid 文件仍指向这个孩子时才删（避免把继任者的记录抹掉）。 */
+function clearPersistPid(pid: number | undefined): void {
+  if (!pid) return;
+  try {
+    if (Number(readFileSync(PERSIST_PID, 'utf-8').trim()) === pid) unlinkSync(PERSIST_PID);
+  } catch { /* 无文件或已清 */ }
+}
+
+function clearStalePersistChild(): void {
+  let old = 0;
+  try { old = Number(readFileSync(PERSIST_PID, 'utf-8').trim()); } catch { return; }  // 无 pid 文件 = 首启
+  if (!old || old === process.pid) return;
+  const dropPid = () => { try { unlinkSync(PERSIST_PID); } catch { /* ignore */ } };   // 死记录顺手删，免得每次启动白读
+  // pid 会被系统回收：先确认这个号现在真是个 claude，否则盲杀会误伤同号的无关进程
+  let argv0 = '';
+  try { argv0 = readFileSync(`/proc/${old}/cmdline`, 'utf-8').split('\0')[0] ?? ''; } catch {
+    dropPid();   // 进程早没了，记录是死的
+    return;
+  }
+  if (argv0.split('/').pop() !== 'claude') {
+    log(`persist.pid 指向的 pid ${old} 不是 claude（${argv0 || '空'}），跳过清理并删掉死记录`);
+    dropPid();
+    return;
+  }
+  try {
+    process.kill(old, 'SIGKILL');   // 残留的就杀掉，免得新进程 resume 同一条会话时打架
+    log(`清掉残留的常驻 claude（pid ${old}）`);
+  } catch { /* 早没了 */ }
+  dropPid();
+}
+
+function spawnPersistent(): Persistent {
+  const args = [
+    '-p',
+    '--input-format', 'stream-json',
+    '--output-format', 'stream-json',
+    '--verbose',
+    '--dangerously-skip-permissions',
+    '--append-system-prompt', BROKER_SYSTEM_PROMPT,
+    ...(persistSessionId ? ['--resume', persistSessionId] : []),
+  ];
+  log(`—— 起常驻 claude${persistSessionId ? `（resume ${persistSessionId}）` : ''} ——`);
+  const child = spawn(CLAUDE_BIN, args, {
+    cwd: SESSION_CWD,
+    env: { ...process.env, LARK_NO_WATCH: '1', LARK_BROKER: '1' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  const p: Persistent = { child, sessionId: persistSessionId, resolveTurn: null, currentBatch: null, lastType: null, buf: '' };
+  const outFile = join(LOG_DIR, `persist-${Date.now()}.jsonl`);
+  if (child.pid) writePersistPid(child.pid);
+
+  child.stdout.on('data', (d: Buffer) => {
+    try { appendFileSync(outFile, d); } catch {}
+    bumpWatchdog();   // 有新字节＝还活着，重置静默计时
+    p.buf += d.toString('utf-8');
+    let i: number;
+    while ((i = p.buf.indexOf('\n')) >= 0) {
+      const line = p.buf.slice(0, i).trim();
+      p.buf = p.buf.slice(i + 1);
+      if (!line) continue;
+      try {
+        const obj = JSON.parse(line);
+        p.lastType = obj?.type === 'system' ? `system:${obj?.subtype ?? ''}` : String(obj?.type ?? '?');
+        if (obj?.type === 'system' && obj?.subtype === 'init' && typeof obj.session_id === 'string') {
+          p.sessionId = obj.session_id;
+          persistSessionId = obj.session_id;   // 供崩溃后 resume
+        } else if (obj?.type === 'result') {
+          const r = p.resolveTurn; p.resolveTurn = null;
+          p.currentBatch = null;   // 正常收尾，别让后续崩溃拿旧事件回错会话
+          clearWatchdog();
+          log(`—— 一轮结束（常驻）${obj?.is_error ? ' [error]' : ''}，输出存 ${outFile} ——`);
+          if (r) r();
+          if (shutdownRequested) doShutdown();   // 收尾了，退出
+        }
+      } catch { /* 非 JSON 行忽略 */ }
+    }
+  });
+  child.stderr.on('data', (d: Buffer) => { process.stderr.write(`[claude-p] ${d}`); });
+  child.on('error', (err) => {
+    log(`常驻 claude 起不来: ${err.message}`);
+    clearWatchdog();
+    if (persist === p) persist = null;
+    clearPersistPid(child.pid);
+    const r = p.resolveTurn; p.resolveTurn = null;
+    const batch = p.currentBatch; p.currentBatch = null;
+    if (r) { r(); void notifyTurnBroken(`常驻进程起不来: ${err.message}`, batch); }
+  });
+  child.on('close', (code) => {
+    log(`—— 常驻 claude 退出（exit ${code}）——`);
+    clearWatchdog();
+    if (persist === p) persist = null;
+    clearPersistPid(child.pid);
+    const r = p.resolveTurn; p.resolveTurn = null;
+    const batch = p.currentBatch; p.currentBatch = null;
+    if (r) { r(); void notifyTurnBroken(`常驻进程退出 exit ${code}`, batch); }
+  });
+
+  persist = p;
+  return p;
+}
+
+function runTurnPersistent(batch: BatchItem[]): Promise<void> {
+  const prompt = renderBatch(batch);
+  log(`—— 起一轮（常驻），${batch.length} 条 ——`);
+  const p = persist ?? spawnPersistent();
+  const line = JSON.stringify({
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'text', text: prompt }] },
+  });
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => { if (!settled) { settled = true; resolve(); } };
+    // busy 已把轮次串行化，这里为真说明有轮次没被 resolve（崩溃重连路径）；
+    // 覆盖上去会让上一轮永远挂着，记一笔便于回溯。
+    if (p.resolveTurn) log('!! 断言失败：常驻进程上已有未完成的轮次，resolveTurn 被覆盖');
+    p.resolveTurn = finish;
+    p.currentBatch = batch;
+    p.lastType = null;
+    bumpWatchdog();
+    try {
+      p.child.stdin.write(line + '\n');
+    } catch (e: any) {
+      log(`写入常驻 claude 失败: ${e?.message ?? e}`);
+      p.resolveTurn = null;
+      p.currentBatch = null;
+      clearWatchdog();
+      finish();
+      void notifyTurnBroken(`写入常驻进程失败: ${e?.message ?? e}`, batch);
+    }
+  });
+}
+
+function runTurn(batch: BatchItem[]): Promise<void> {
+  return USE_PERSISTENT ? runTurnPersistent(batch) : runTurnSpawn(batch);
+}
+
+// broker 自己退出时别把常驻 claude 留成攥着会话的孤儿。但正在跑的那轮不能掐死——
+// 有轮次在跑就先等它把 result 落完再退（result 处理里会收尾），再收一次信号强制退。
+let shutdownRequested = false;
+function doShutdown(): void {
+  // shutdownRequested 后 tick 不再起新轮，堆在 pending 里的事件这轮就没了，记一笔免得静默丢
+  if (pending.length > 0) log(`退出中，丢弃 ${pending.length} 条未处理事件（不重放）`);
+  clearWatchdog();
+  const p = persist;
+  if (!p) { try { unlinkSync(PERSIST_PID); } catch { /* ignore */ } process.exit(0); }
+  let done = false;
+  const fin = (): void => {
+    if (done) return; done = true;
+    clearPersistPid(p.child.pid);   // 子进程确实没了，记录才删得掉
+    process.exit(0);
+  };
+  // 子进程可能早就退了（error / close 已走过）：此时 once('close') 不会再触发，
+  // 会白等满 2s 还打「pid 刻意保留」，那条日志是误报——直接收尾。
+  if (p.child.exitCode !== null || p.child.signalCode !== null) return fin();
+  p.child.once('close', fin);
+  try { p.child.kill('SIGTERM'); } catch { /* ignore */ }
+  // 2s 还没退：留着 persist.pid，下次启动靠它清这个顽固残留（宁可多留，别漏）
+  setTimeout(() => {
+    if (done) return; done = true;
+    log('常驻进程 2s 内没退出，persist.pid 刻意保留（别当 bug 删）——下次启动靠 /proc 校验清这个残留');
+    process.exit(0);
+  }, 2000);
+}
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(sig, () => {
+    if (shutdownRequested) return doShutdown();     // 第二次信号：立即退
+    if (persist?.resolveTurn) {                      // 有轮次在跑：别掐死，等收尾
+      shutdownRequested = true;
+      log(`收到 ${sig}，有轮次在跑——等它收尾后退出（再发一次信号强制退）`);
+      return;
+    }
+    doShutdown();
+  });
+}
+
 function scheduleTick(): void {
   setImmediate(tick);
 }
 
 async function tick(): Promise<void> {
-  if (busy || pending.length === 0) return;
+  if (busy || shutdownRequested || pending.length === 0) return;   // 要退了就别再起新轮
   busy = true;
   const batch = pending.splice(0, pending.length);
   try {
@@ -473,6 +726,7 @@ async function main(): Promise<void> {
   }
 
   log(`broker 启动 | cwd=${SESSION_CWD} session=${SESSION_ID} claude=${CLAUDE_BIN}`);
+  if (USE_PERSISTENT) clearStalePersistChild();   // 清掉上一任硬杀留下的常驻 claude
   ensureNamesFile();
   loadNames();
   await fetchOwnOpenId();

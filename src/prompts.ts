@@ -20,6 +20,10 @@ const SKILLS: Array<{ name: string; file: string; description: string }> = [
   { name: 'feishu-interactive-cards',file: 'feishu/feishu-interactive-cards/SKILL.md',      description: 'Confirm dialogs, input forms, and progress tracker cards — interactive cards that update themselves' },
   { name: 'feishu-watch-loop',         file: 'feishu/feishu-watch-loop/SKILL.md',               description: 'Behavioural rules for autonomous watch-loop mode: loop structure, responding via Feishu, cards, schedules' },
   { name: 'feishu-doc',              file: 'feishu/feishu-doc/SKILL.md',                    description: 'Create, read, append, edit, delete, and search Lark documents' },
+  { name: 'feishu-comment',          file: 'feishu/feishu-comment/SKILL.md',                description: 'Document comments: list, reply, resolve, react — tenant token only' },
+  { name: 'feishu-wiki',             file: 'feishu/feishu-wiki/SKILL.md',                   description: 'Wiki knowledge-space operations: list nodes, create/copy/move, members' },
+  { name: 'aihot',                   file: 'aihot/SKILL.md',                                description: 'AI HOT daily digest and AI news queries' },
+  { name: 'feishu-ssh',              file: 'ssh/SKILL.md',                                  description: 'Remote exec on Windows (win_exec) and Raspberry Pi 5 (pi_exec) via frp' },
 ];
 
 // ── Inline prompt definitions ───────────────────────────────────────────────

@@ -33,6 +33,10 @@ import { registerImTools } from './tools/im.js';
 import { registerLoopTools } from './tools/loop.js';
 import { registerDocTools, registerCommentTools } from './tools/docs.js';
 import { registerTokenProxyTools } from './tools/token-proxy.js';
+import { registerAihotTools } from './tools/aihot.js';
+import { registerSshTools } from './tools/ssh.js';
+import { registerAmapTools } from './tools/amap.js';
+import { live2d } from './tools/live2d.js';
 import { registerPrompts } from './prompts.js';
 
 // ---------------------------------------------------------------------------
@@ -59,6 +63,13 @@ const server = new McpServer({
 // Load persisted token and schedule auto-refresh
 initAuth();
 
+// Broker 模式下 MCP 每轮随 claude 重启一次，启动这一瞬就当作"收到消息"的触发点：
+// 切「拿笔」，回复时再由 feishu_im_send 复位成「无」—— 复原旧 watch 的两拍。
+// 用 fireExpression（spawn 版）而不是 expression，免得隧道不通时 execSync 卡住启动。
+if (process.env.LARK_BROKER) {
+  live2d.fireExpression(4);   // 4 = 拿笔
+}
+
 // Attempt WebSocket long connection for real-time IM events.
 // Set LARK_NO_WATCH=1 to skip — useful for a send-only instance sharing the same app
 // with a separate watch-loop instance (avoids event delivery collisions).
@@ -71,7 +82,7 @@ if (appId && appSecret) {
   }
 }
 
-// Wrap server.tool to log every tool call before registering tools
+// Wrap server.tool to log every tool call and optionally push a Live2D bubble
 const _origTool = server.tool.bind(server);
 (server as any).tool = function (name: string, ...rest: any[]) {
   const handler = rest[rest.length - 1];
@@ -81,6 +92,18 @@ const _origTool = server.tool.bind(server);
       try {
         const result = await handler(params, extra);
         logToolCall(name, params ?? {}, true, Date.now() - t0);
+        // Fire-and-forget Live2D bubble for tool calls (skip noisy/internal ones)
+        if (name !== 'feishu_im_watch') {
+          if (name === 'win_exec' || name === 'pi_exec') {
+            // Show the actual command being run, filter out live2d self-calls
+            const cmd: string = (params as any)?.command ?? '';
+            if (!cmd.includes('live2d.py') && !cmd.includes('live2d\\')) {
+              live2d.fireToolBubble('⚡ ' + cmd.slice(0, 80), {});
+            }
+          } else {
+            live2d.fireToolBubble(name, params ?? {});
+          }
+        }
         return result;
       } catch (err) {
         logToolCall(name, params ?? {}, false, Date.now() - t0);
@@ -101,6 +124,9 @@ registerLoopTools(server);
 registerDocTools(server);
 registerCommentTools(server);
 await registerTokenProxyTools(server);
+registerAihotTools(server);
+registerSshTools(server);
+registerAmapTools(server);
 
 // Prompts (skill guides)
 registerPrompts(server);

@@ -1,6 +1,10 @@
-node_modules/
-dist/
+node_modules
+dist
+build
+*.log
 .env
-.env.*
-*.env
-~/.config/lark-mcp/
+.env.local
+*.tar.gz
+*.zip
+.DS_Store
+tokens.json

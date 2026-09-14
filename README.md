@@ -47,6 +47,7 @@ Each tier is a strict superset of the previous — start small, add OAuth when y
 | `feishu_auth_status` | Check if authenticated and token is valid |
 | `feishu_auth_init` | Start OAuth — blocks until authorized (up to 10 min). Sends an auth card in Feishu if open_id is known. |
 | `feishu_auth_whoami` | Return the authenticated user's open_id and name |
+| `feishu_auth_issue_token` | Issue a time-limited proxy token for third-party scripts to access the Feishu API without exposing the real user token |
 
 ### People
 
@@ -116,6 +117,52 @@ Each tier is a strict superset of the previous — start small, add OAuth when y
 | `feishu_doc_delete` | Delete a block |
 | `feishu_doc_delete_file` | Permanently delete an entire document from Drive |
 
+### Comments
+
+| Tool | Description |
+|---|---|
+| `feishu_doc_comment_list` | List comments on a document (filter by solved/whole, include reactions) |
+| `feishu_doc_comment_get_replies` | Get replies for a comment |
+| `feishu_doc_comment_add_whole` | Add a whole-document comment |
+| `feishu_doc_comment_add_reply` | Add a reply to a comment (@mention optional) |
+| `feishu_doc_comment_update_reply` | Update a reply |
+| `feishu_doc_comment_delete_reply` | Delete a reply |
+| `feishu_doc_comment_resolve` | Resolve / unresolve a comment |
+| `feishu_doc_comment_reaction` | Add / remove an emoji reaction on a reply |
+
+### Wiki
+
+| Tool | Description |
+|---|---|
+| `feishu_wiki_list_spaces` | List wiki spaces (user token) |
+| `feishu_wiki_get_space_tenant` | Get wiki space info (tenant token) |
+| `feishu_wiki_get_space_user` | Get wiki space info (user token) |
+| `feishu_wiki_list_nodes_tenant` | List child nodes of a space or parent node |
+| `feishu_wiki_get_node_tenant` | Get node info by node or document token |
+| `feishu_wiki_create_node_tenant` | Create a node (docx/sheet/mindnote/bitable/file/slides) |
+| `feishu_wiki_copy_node_tenant` | Copy a node to a new location |
+| `feishu_wiki_move_node_tenant` | Move a node (same or cross space) |
+| `feishu_wiki_update_title_tenant` | Update a node title |
+| `feishu_wiki_create_space` | Create a knowledge space (user token) |
+| `feishu_wiki_add_member` | Add a member or admin to a space |
+| `feishu_wiki_list_members_tenant` | List space members (tenant token) |
+| `feishu_wiki_list_members_user` | List space members (user token) |
+
+### AI HOT
+
+| Tool | Description |
+|---|---|
+| `aihot_daily` | Get the latest (or a specific date's) AI daily digest; optional card format |
+| `aihot_dailies` | List available daily digest dates |
+| `aihot_items` | Query AI news items (category / keyword / time window) |
+
+### Remote Machines
+
+| Tool | Description |
+|---|---|
+| `win_exec` | Execute a command on the remote Windows machine (frp tunnel, port 2226) |
+| `pi_exec` | Execute a command on the remote Raspberry Pi 5 (frp tunnel, port 2227) |
+
 ---
 
 ## Skills (MCP prompts)
@@ -137,6 +184,7 @@ The server exposes SKILL.md files as MCP prompts. Inject them into context with 
 
 ## Known limitations
 
+- **Do not run a separate `start-watch` process alongside this MCP server.** Lark delivers each event to only one connected WebSocket. A standalone watch process would split events with the server, causing randomly lost messages (some go to the background process the model can't see). If the watch loop runs through the MCP server directly, kill any standalone `start-watch` processes — remove the file too if needed.
 - `feishu_calendar_list` time range is capped at 40 days by the Lark `instance_view` API
 - `feishu_doc_search` requires user auth (not available with app token only)
 - `feishu_doc_fetch` plain-text output omits inline equation content

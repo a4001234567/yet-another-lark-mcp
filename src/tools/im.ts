@@ -10,6 +10,7 @@ import { tmpdir } from 'os';
 import { join, extname, basename } from 'path';
 import { getLarkClient, asUser, withAuth } from '../client.js';
 import { withModuleAuth } from '../auth-guard.js';
+import { live2d } from './live2d.js';
 
 // MIME type → extension map for downloaded resources
 const MIME_TO_EXT: Record<string, string> = {
@@ -130,6 +131,8 @@ export function registerImTools(server: McpServer) {
         });
       }
       if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+      // Live2D: message sent → idle (put down pen)
+      live2d.expression(1).catch(() => {});
       return { message_id: res.data?.message_id, chat_id: res.data?.chat_id, sent: true, msg_type };
     }),
   );

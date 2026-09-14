@@ -53,14 +53,16 @@ function larkPut(path: string, body: any, token: string): Promise<any> {
   });
 }
 
-function larkDelete(path: string, token: string): Promise<any> {
+function larkDelete(path: string, token: string, body?: any): Promise<any> {
   return new Promise((resolve, reject) => {
+    const payload = body ? JSON.stringify(body) : undefined;
     const req = https.request(
       { hostname: 'open.feishu.cn', path, method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` } },
+        headers: { 'Authorization': `Bearer ${token}`, ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}) } },
       r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } }); },
     );
     req.on('error', reject);
+    if (payload) req.write(payload);
     req.end();
   });
 }
@@ -385,30 +387,53 @@ export function registerDocTools(server: McpServer) {
       done:        z.boolean().optional().describe('For todo blocks — mark checkbox as checked/unchecked'),
     },
     async ({ document_id, block_id, text, bold, italic, inline_code, done }) => withModuleAuth('docs', async () => {
-      const client = getLarkClient();
       const style: any = {};
       if (bold)        style.bold        = true;
       if (italic)      style.italic      = true;
       if (inline_code) style.inline_code = true;
 
-      // patch uses update_text_elements (replaces all inline elements of the block)
       const updateData: any = {
         update_text_elements: {
           elements: [{ text_run: { content: text, text_element_style: style } }],
         },
       };
-      // For todo: also update the done state via update_text_style
       if (done !== undefined) {
         updateData.update_text_style = { done };
       }
 
-      const res = await (client as any).docx.v1.documentBlock.patch({
-        path: { document_id, block_id },
-        params: { document_revision_id: -1 },
-        data: updateData,
-      }, asUser());
-      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
-      return { ok: true, document_id, block_id, updated: true };
+      // Try tenant token first, fallback to user token
+      const appId = process.env.LARK_APP_ID;
+      const appSecret = process.env.LARK_APP_SECRET;
+      if (!appId || !appSecret) throw new Error('LARK_APP_ID and LARK_APP_SECRET must be set');
+      const tenantToken = await getTenantAccessToken(appId, appSecret);
+
+      let useTenantToken = true;
+      try {
+        const res = await larkPatch(
+          `/open-apis/docx/v1/documents/${document_id}/blocks/${block_id}`,
+          updateData,
+          tenantToken
+        );
+        if (res.code === 0) {
+          return { ok: true, document_id, block_id, updated: true, used_tenant_token: true };
+        } else {
+          useTenantToken = false;
+        }
+      } catch {
+        useTenantToken = false;
+      }
+
+      // Fallback to user token
+      if (!useTenantToken) {
+        const client = getLarkClient();
+        const res = await (client as any).docx.v1.documentBlock.patch({
+          path: { document_id, block_id },
+          params: { document_revision_id: -1 },
+          data: updateData,
+        }, asUser());
+        if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+        return { ok: true, document_id, block_id, updated: true, used_tenant_token: false };
+      }
     }),
   );
 
@@ -424,30 +449,71 @@ export function registerDocTools(server: McpServer) {
       block_id:    z.string().describe('Block ID to delete (from feishu_doc_fetch blocks list)'),
     },
     async ({ document_id, block_id }) => withModuleAuth('docs', async () => {
-      const client = getLarkClient();
-      // Find the block's parent and its index among siblings
-      const listRes = await (client as any).docx.v1.documentBlock.list({
-        path: { document_id },
-        params: { page_size: 500, document_revision_id: -1 },
-      }, asUser());
-      if (listRes.code !== 0) throw new Error(`List blocks error ${listRes.code}: ${listRes.msg}`);
+      // Try tenant token first, fallback to user token
+      const appId = process.env.LARK_APP_ID;
+      const appSecret = process.env.LARK_APP_SECRET;
+      if (!appId || !appSecret) throw new Error('LARK_APP_ID and LARK_APP_SECRET must be set');
+      const tenantToken = await getTenantAccessToken(appId, appSecret);
 
-      const allBlocks: any[] = listRes.data?.items ?? [];
-      const target = allBlocks.find((b: any) => b.block_id === block_id);
-      if (!target) throw new Error(`Block ${block_id} not found in document`);
-      const parentId: string = target.parent_id;
-      const parent = allBlocks.find((b: any) => b.block_id === parentId);
-      if (!parent) throw new Error(`Parent block ${parentId} not found`);
-      const idx: number = (parent.children ?? []).indexOf(block_id);
-      if (idx === -1) throw new Error(`Block ${block_id} not found in parent's children list`);
+      let useTenantToken = true;
 
-      const res = await (client as any).docx.v1.documentBlockChildren.batchDelete({
-        path: { document_id, block_id: parentId },
-        params: { document_revision_id: -1 },
-        data: { start_index: idx, end_index: idx + 1 },
-      }, asUser());
-      if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
-      return { ok: true, document_id, block_id, deleted: true };
+      try {
+        // List blocks with tenant token
+        const listRes = await larkGet(
+          `/open-apis/docx/v1/documents/${document_id}/blocks?page_size=500&document_revision_id=-1`,
+          tenantToken
+        );
+        if (listRes.code !== 0) { useTenantToken = false; throw new Error(''); }
+
+        const allBlocks: any[] = listRes.data?.items ?? [];
+        const target = allBlocks.find((b: any) => b.block_id === block_id);
+        if (!target) throw new Error(`Block ${block_id} not found in document`);
+        const parentId: string = target.parent_id;
+        const parent = allBlocks.find((b: any) => b.block_id === parentId);
+        if (!parent) throw new Error(`Parent block ${parentId} not found`);
+        const idx: number = (parent.children ?? []).indexOf(block_id);
+        if (idx === -1) throw new Error(`Block ${block_id} not found in parent's children list`);
+
+        const delRes = await larkDelete(
+          `/open-apis/docx/v1/documents/${document_id}/blocks/${parentId}/children/batch_delete`,
+          tenantToken,
+          { start_index: idx, end_index: idx + 1 }
+        );
+        if (delRes.code === 0) {
+          return { ok: true, document_id, block_id, deleted: true, used_tenant_token: true };
+        } else {
+          useTenantToken = false;
+        }
+      } catch {
+        useTenantToken = false;
+      }
+
+      // Fallback to user token
+      if (!useTenantToken) {
+        const client = getLarkClient();
+        const listRes = await (client as any).docx.v1.documentBlock.list({
+          path: { document_id },
+          params: { page_size: 500, document_revision_id: -1 },
+        }, asUser());
+        if (listRes.code !== 0) throw new Error(`List blocks error ${listRes.code}: ${listRes.msg}`);
+
+        const allBlocks: any[] = listRes.data?.items ?? [];
+        const target = allBlocks.find((b: any) => b.block_id === block_id);
+        if (!target) throw new Error(`Block ${block_id} not found in document`);
+        const parentId: string = target.parent_id;
+        const parent = allBlocks.find((b: any) => b.block_id === parentId);
+        if (!parent) throw new Error(`Parent block ${parentId} not found`);
+        const idx: number = (parent.children ?? []).indexOf(block_id);
+        if (idx === -1) throw new Error(`Block ${block_id} not found in parent's children list`);
+
+        const res = await (client as any).docx.v1.documentBlockChildren.batchDelete({
+          path: { document_id, block_id: parentId },
+          params: { document_revision_id: -1 },
+          data: { start_index: idx, end_index: idx + 1 },
+        }, asUser());
+        if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+        return { ok: true, document_id, block_id, deleted: true, used_tenant_token: false };
+      }
     }),
   );
 
@@ -519,9 +585,11 @@ export function registerDocTools(server: McpServer) {
       'image_path: only for image — local file path to upload (png/jpg/gif/webp).',
       'callout_emoji: only for callout — Unicode hex codepoint e.g. "1f4a1"=💡 "26a0"=⚠️ "2705"=✅.',
       'callout_bg: only for callout — background color 1–7 (LightRed/Orange/Yellow/Green/Blue/Purple/Gray).',
+      'index: insert at this position among the document body blocks (0-based, same as the order returned by feishu_doc_fetch). Omit to append at the end.',
     ].join('\n'),
     {
       document_id: z.string().describe('Document token/ID'),
+      index:       z.number().int().optional().describe('Insertion position among the document body blocks (0-based). Omit to append at the end.'),
       text:        z.string().optional().describe('Text content (not used for image type)'),
       type:        z.enum(['paragraph','heading1','heading2','heading3','heading4','heading5','heading6','bullet','ordered','code','quote','todo','callout','equation','image'])
                      .default('paragraph').optional(),
@@ -534,7 +602,9 @@ export function registerDocTools(server: McpServer) {
       callout_bg:    z.number().int().min(1).max(7).optional().describe('For callout blocks — background color: 1=LightRed 2=LightOrange 3=LightYellow 4=LightGreen 5=LightBlue 6=LightPurple 7=LightGray'),
       markdown:    z.string().optional().describe('Markdown content to append as multiple blocks. If provided, all other content params (text, type, etc.) are ignored.'),
     },
-    async ({ document_id, text = '', type = 'paragraph', bold, italic, inline_code, done, image_path, callout_emoji, callout_bg, markdown }) => withModuleAuth('docs', async () => {
+    async ({ document_id, index: insertIndex, text = '', type = 'paragraph', bold, italic, inline_code, done, image_path, callout_emoji, callout_bg, markdown }) => withModuleAuth('docs', async () => {
+      // Omitted / negative → append at the end (Lark treats -1 as "append").
+      const at = insertIndex !== undefined && insertIndex >= 0 ? insertIndex : -1;
       const client = getLarkClient();
       const docRes = await (client as any).docx.v1.document.get(
         { path: { document_id } }, asUser(),
@@ -575,7 +645,7 @@ export function registerDocTools(server: McpServer) {
         const requestBody = {
           children_id: children_id.length > 0 ? children_id : descendants.map((_: any, i: number) => `temp_${i}`),
           descendants,
-          index: -1,
+          index: at,
         };
 
         // Step 3: Try tenant token first, fallback to user token
@@ -621,7 +691,7 @@ export function registerDocTools(server: McpServer) {
       if (type === 'image') {
         if (!image_path) throw new Error('image_path is required for image blocks');
 
-        const createBody = { children: [{ block_type: 27, image: {} }], index: -1 };
+        const createBody = { children: [{ block_type: 27, image: {} }], index: at };
         let useTenantToken = false;
         let createRes: any = null;
         const appId = process.env.LARK_APP_ID;
@@ -691,7 +761,7 @@ export function registerDocTools(server: McpServer) {
             elements: [{ equation: { content: latex, text_element_style: {} } }],
             style: { align: 1, folded: false },
           }}],
-          index: -1,
+          index: at,
         };
 
         // Try tenant token first, fallback to user token
@@ -740,7 +810,7 @@ export function registerDocTools(server: McpServer) {
         const calloutData: any = {};
         if (callout_emoji) calloutData.emoji_id = callout_emoji;
         if (callout_bg)    calloutData.background_color = callout_bg;
-        const createBody = { children: [{ block_type: 19, callout: calloutData }], index: -1 };
+        const createBody = { children: [{ block_type: 19, callout: calloutData }], index: at };
 
         // Try tenant token first, fallback to user token
         const appId = process.env.LARK_APP_ID;
@@ -866,7 +936,7 @@ export function registerDocTools(server: McpServer) {
 
       const requestBody = {
         children: [{ block_type, [blockKey]: blockContent }],
-        index: -1,
+        index: at,
       };
 
       // Try tenant token first, fallback to user token

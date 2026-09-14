@@ -47,6 +47,7 @@
 | `feishu_auth_status` | 检查认证状态和 Token 有效性 |
 | `feishu_auth_init` | 启动 OAuth 授权 — 阻塞直到完成（最多 10 分钟）。已知 open_id 时发送授权卡片，否则返回授权 URL。 |
 | `feishu_auth_whoami` | 返回当前用户的 open_id 和姓名 |
+| `feishu_auth_issue_token` | 为第三方脚本签发限时代理 Token，无需暴露真实用户 Token |
 
 ### 人员
 
@@ -116,6 +117,52 @@
 | `feishu_doc_delete` | 删除块 |
 | `feishu_doc_delete_file` | 从云盘永久删除整个文档 |
 
+### 评论
+
+| 工具 | 说明 |
+|---|---|
+| `feishu_doc_comment_list` | 列出文档评论（可按已解决/全文筛选，可含表情） |
+| `feishu_doc_comment_get_replies` | 获取某条评论的回复 |
+| `feishu_doc_comment_add_whole` | 添加全文评论 |
+| `feishu_doc_comment_add_reply` | 回复评论（可选 @ 提及） |
+| `feishu_doc_comment_update_reply` | 更新回复 |
+| `feishu_doc_comment_delete_reply` | 删除回复 |
+| `feishu_doc_comment_resolve` | 解决 / 取消解决评论 |
+| `feishu_doc_comment_reaction` | 在回复上添加 / 移除表情 |
+
+### Wiki
+
+| 工具 | 说明 |
+|---|---|
+| `feishu_wiki_list_spaces` | 列出知识库（用户 Token） |
+| `feishu_wiki_get_space_tenant` | 获取知识库信息（租户 Token） |
+| `feishu_wiki_get_space_user` | 获取知识库信息（用户 Token） |
+| `feishu_wiki_list_nodes_tenant` | 列出知识库或父节点下的子节点 |
+| `feishu_wiki_get_node_tenant` | 按节点或文档 Token 获取节点信息 |
+| `feishu_wiki_create_node_tenant` | 创建节点（docx/sheet/mindnote/bitable/file/slides） |
+| `feishu_wiki_copy_node_tenant` | 复制节点到新位置 |
+| `feishu_wiki_move_node_tenant` | 移动节点（同知识库或跨知识库） |
+| `feishu_wiki_update_title_tenant` | 更新节点标题 |
+| `feishu_wiki_create_space` | 创建知识库（用户 Token） |
+| `feishu_wiki_add_member` | 向知识库添加成员或管理员 |
+| `feishu_wiki_list_members_tenant` | 列出知识库成员（租户 Token） |
+| `feishu_wiki_list_members_user` | 列出知识库成员（用户 Token） |
+
+### AI HOT
+
+| 工具 | 说明 |
+|---|---|
+| `aihot_daily` | 获取最新（或指定日期）AI 日报；可选卡片格式 |
+| `aihot_dailies` | 列出可用的日报日期 |
+| `aihot_items` | 查询 AI 新闻条目（分类 / 关键词 / 时间窗口） |
+
+### 远程机器
+
+| 工具 | 说明 |
+|---|---|
+| `win_exec` | 在远程 Windows 机器上执行命令（frp 隧道，端口 2226） |
+| `pi_exec` | 在远程树莓派 5 上执行命令（frp 隧道，端口 2227） |
+
 ---
 
 ## 技能（MCP Prompts）
@@ -137,6 +184,7 @@
 
 ## 已知限制
 
+- **不要与此 MCP 服务器并行运行单独的 `start-watch` 进程。** Lark 只将每个事件投递给一条已连接的 WebSocket。独立的监听进程会与服务器争抢事件，导致消息随机丢失（部分消息进入模型看不到的后台进程）。如果监听循环直接通过 MCP 服务器运行，请杀掉任何独立的 `start-watch` 进程——必要时连同文件一起删除。
 - `feishu_calendar_list` 时间范围上限为 40 天（受 Lark `instance_view` API 限制）
 - `feishu_doc_search` 需要用户认证（纯 App Token 不可用）
 - `feishu_doc_fetch` 纯文本输出不包含行内公式内容

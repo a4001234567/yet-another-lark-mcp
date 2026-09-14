@@ -1,0 +1,9 @@
+{
+  "default_space_id": "7631752608788564950",
+  "default_space_name": "白咲专属",
+  "notes": {
+    "default_space_id": "创建wiki文档时默认使用的知识库space_id，使用tenant token操作",
+    "nkai_club_space_id": "7580184990181248189",
+    "nkg_enios_space_id": "7486679235764895772"
+  }
+}

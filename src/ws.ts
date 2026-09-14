@@ -20,6 +20,7 @@ import { join } from 'path';
 
 import * as lark from '@larksuiteoapi/node-sdk';
 import { lookupCard, removeCard, buildConfirmRespondedCard, buildFormSubmittedCard } from './card-registry.js';
+import { loadCardSection, saveCardSection } from './card-store.js';
 import { buildProgressCard, ProgressStep } from './cards/progress.js';
 import { logMessage, stderrLogger } from './logger.js';
 
@@ -196,13 +197,26 @@ export type ProgressState = {
   title:       string;
   steps:       ProgressStep[];
   currentStep: number;
+  expiry_at:   number;   // unix ms — when the card stops being live and should be greyed
 };
+
+// Progress cards take no user-set lifetime, so give them a default one. Without
+// it an orphaned card (turn ended mid-task) would never grey out.
+const PROGRESS_TTL_MS = 3600_000;   // 1 hour
 
 const progressStore  = new Map<string, ProgressState>();
 const stopSignals    = new Set<string>();
 
+// Persisted like card-registry (see card-store.ts) so an orphaned progress card
+// can still be greyed out in a later turn. stopSignals is deliberately NOT
+// persisted — a Stop click only has meaning while its turn is alive.
+function persistProgress(): void {
+  saveCardSection('progress', Object.fromEntries(progressStore));
+}
+
 export function registerProgress(message_id: string, title: string, steps: ProgressStep[]): void {
-  progressStore.set(message_id, { title, steps, currentStep: 0 });
+  progressStore.set(message_id, { title, steps, currentStep: 0, expiry_at: Date.now() + PROGRESS_TTL_MS });
+  persistProgress();
 }
 
 export function getProgressState(message_id: string): ProgressState | undefined {
@@ -216,12 +230,31 @@ export function updateProgress(message_id: string, currentStep: number, steps?: 
     title: existing.title,
     steps: steps ?? existing.steps,
     currentStep,
+    expiry_at: existing.expiry_at,
   });
+  persistProgress();
 }
 
 export function removeProgress(message_id: string): void {
   progressStore.delete(message_id);
   stopSignals.delete(message_id);
+  persistProgress();
+}
+
+// Restore progress cards persisted by previous turns (module init).
+for (const [message_id, state] of Object.entries(loadCardSection<ProgressState>('progress'))) {
+  progressStore.set(message_id, state);
+}
+
+/** Progress cards whose lifetime has passed. Does not remove them — the caller
+ *  patches the card first, then calls removeProgress(). */
+export function listExpiredProgress(): Array<{ message_id: string; state: ProgressState }> {
+  const now = Date.now();
+  const out: Array<{ message_id: string; state: ProgressState }> = [];
+  for (const [message_id, state] of progressStore.entries()) {
+    if (state.expiry_at <= now) out.push({ message_id, state });
+  }
+  return out;
 }
 
 /** Returns true (and clears the signal) if the user pressed Stop on this progress card. */

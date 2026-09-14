@@ -7,6 +7,8 @@
  * entries and patches them to a disabled state.
  */
 
+import { loadCardSection, saveCardSection } from './card-store.js';
+
 export type CardType = 'confirm' | 'form';
 
 export type FormField = {
@@ -35,8 +37,17 @@ export type CardEntry = {
 
 const registry = new Map<string, CardEntry>();
 
+// Persist on every mutation: under the broker this process dies at turn end, so
+// a card sent in one turn is only patchable in the next if it's on disk. The
+// `resolve` field (a function) is silently dropped by JSON.stringify — restored
+// entries are therefore always non-blocking, which is what broker mode wants.
+function persist(): void {
+  saveCardSection('registry', Object.fromEntries(registry));
+}
+
 export function registerCard(message_id: string, entry: CardEntry): void {
   registry.set(message_id, entry);
+  persist();
 }
 
 export function lookupCard(message_id: string): CardEntry | undefined {
@@ -45,6 +56,23 @@ export function lookupCard(message_id: string): CardEntry | undefined {
 
 export function removeCard(message_id: string): void {
   registry.delete(message_id);
+  persist();
+}
+
+// Restore cards persisted by previous turns (module init).
+for (const [message_id, entry] of Object.entries(loadCardSection<CardEntry>('registry'))) {
+  registry.set(message_id, entry);
+}
+
+/** Cards whose declared TTL has passed. Does NOT remove them — the caller patches
+ *  first and calls removeCard() only once the patch succeeds. */
+export function listExpiredCards(): Array<{ message_id: string; entry: CardEntry }> {
+  const now = Date.now();
+  const out: Array<{ message_id: string; entry: CardEntry }> = [];
+  for (const [message_id, entry] of registry.entries()) {
+    if (entry.expiry_at <= now) out.push({ message_id, entry });
+  }
+  return out;
 }
 
 /** Called by the watch loop each tick — returns expired entries and removes them. */

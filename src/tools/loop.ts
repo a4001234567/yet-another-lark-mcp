@@ -17,13 +17,15 @@ import {
   getMessageQueue, drainCallbackQueue,
   getSchedules, createSchedule, deleteSchedule, drainFiredSchedules,
   registerProgress, getProgressState, updateProgress, removeProgress, consumeStopSignal,
+  listExpiredProgress,
 } from '../ws.js';
 import {
-  registerCard, removeCard, drainExpiredCards,
-  buildConfirmActiveCard, buildConfirmExpiredCard,
-  buildFormActiveCard, buildFormExpiredCard,
+  registerCard, removeCard, drainExpiredCards, listExpiredCards, lookupCard,
+  buildConfirmActiveCard, buildConfirmExpiredCard, buildConfirmRespondedCard,
+  buildFormActiveCard, buildFormExpiredCard, buildFormSubmittedCard,
   CardEntry, FormField,
 } from '../card-registry.js';
+import { live2d } from './live2d.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -61,6 +63,11 @@ function drainQueue(chat_id: string | undefined) {
 
 const COLLECT_IDLE_MS = 5_000;  // return once this many ms pass with no new message
 
+// broker 模式下本进程没有 WS，卡片回调落在 broker 手上，blocking 等待必然走到超时
+// （默认 3600s），而且点击还要排在当前轮后面 —— 双向互等，等于把这一轮挂死。
+// 故 broker 模式下强制降级为非阻塞，返回值里带 blocking_downgraded 提示调用方。
+const BROKER_MODE = !!process.env.LARK_BROKER;
+
 async function patchCard(message_id: string, cardJson: object) {
   try {
     const client = getLarkClient();
@@ -75,6 +82,9 @@ async function patchCard(message_id: string, cardJson: object) {
 
 export function registerLoopTools(server: McpServer) {
   // ── watch ──────────────────────────────────────────────────────────────────
+  // broker 模式（LARK_NO_WATCH=1）下不注册：本进程没有长连接、队列永远为空，
+  // 调用它只会阻塞到 timeout。消息改由 broker 推送，agent 不再需要 watch。
+  if (!process.env.LARK_NO_WATCH) {
   server.tool(
     'feishu_im_watch',
     [
@@ -215,6 +225,9 @@ export function registerLoopTools(server: McpServer) {
         }
 
         if (newMessages.length > 0) {
+          // Live2D: user message received → set busy expression (拿笔)
+          live2d.expression(4).catch(() => {});
+
           // ── Collection window ─────────────────────────────────────────────
           // Accumulate messages until 5 seconds of silence, then return all.
           const batch = [...newMessages];
@@ -257,6 +270,7 @@ export function registerLoopTools(server: McpServer) {
       return 'feishu_im_watch timed out without any new messages. Please re-execute feishu_im_watch to resume listening.';
     }),
   );
+  }   // end if (!LARK_NO_WATCH)
 
   // ── schedule_create ────────────────────────────────────────────────────────
   server.tool(
@@ -310,11 +324,12 @@ export function registerLoopTools(server: McpServer) {
       'Send a confirm/cancel interactive card and optionally block until the user responds.',
       '',
       'blocking=false (default): returns immediately with message_id + expires_at.',
-      '  The user\'s click is returned in the next feishu_im_watch call as card_callbacks.',
-      '  The card updates itself inline automatically.',
+      '  The click comes back later as a card callback (broker push, or the next feishu_im_watch call) — not as this call\'s return value.',
       '',
       'blocking=true: waits for the user to click (or timeout), then returns action="confirm"|"cancel"|"timeout".',
       '  The card updates itself inline on click; on timeout it is patched to 已失效.',
+      '  NOT available under the broker (LARK_BROKER=1): there is no WS in this process, so the wait would',
+      '  always time out. blocking is force-downgraded to false and the result carries blocking_downgraded: true.',
     ].join('\n'),
     {
       receive_id:      z.string().describe('open_id (ou_xxx) or chat_id (oc_xxx)'),
@@ -332,6 +347,7 @@ export function registerLoopTools(server: McpServer) {
     async ({ receive_id, title, body, confirm_label = '确认', cancel_label = '取消', template = 'red', blocking = false, timeout_seconds = 3600 }) =>
       withAuth(async () => {
         const client = getLarkClient();
+        const blockingWait = blocking && !BROKER_MODE;   // broker 下强制非阻塞，见 BROKER_MODE 注释
 
         const entryBase = { card_type: 'confirm' as const, title, body, confirm_label, cancel_label, template };
         const card = buildConfirmActiveCard(entryBase);
@@ -346,7 +362,7 @@ export function registerLoopTools(server: McpServer) {
         const expiry_at  = Date.now() + timeout_seconds * 1000;
         const expires_at = new Date(expiry_at).toISOString();
 
-        if (blocking) {
+        if (blockingWait) {
           // Create a Promise that resolves when the user clicks
           let resolveCallback!: (r: { action: string }) => void;
           const callbackPromise = new Promise<{ action: string }>(res => { resolveCallback = res; });
@@ -370,7 +386,10 @@ export function registerLoopTools(server: McpServer) {
 
         // Non-blocking: register and return
         registerCard(message_id, { ...entryBase, expiry_at });
-        return { message_id, expires_at, timed_out: false };
+        return {
+          message_id, expires_at, timed_out: false,
+          ...(blocking && BROKER_MODE ? { blocking_downgraded: true } : {}),
+        };
       }),
   );
 
@@ -384,10 +403,12 @@ export function registerLoopTools(server: McpServer) {
       'hidden=true renders the field as a password input (shows ****** after submission).',
       '',
       'blocking=false (default): returns immediately with message_id + expires_at.',
-      '  The submitted form_value is returned in the next feishu_im_watch call as card_callbacks.',
+      '  The submitted form_value comes back later as a card callback (broker push, or the next feishu_im_watch call).',
       '',
       'blocking=true: waits for submission (or timeout), then returns form_value map.',
       '  The card updates to a disabled submitted state on submit; to expired on timeout.',
+      '  NOT available under the broker (LARK_BROKER=1): no WS in this process, so the wait would always time out.',
+      '  blocking is force-downgraded to false and the result carries blocking_downgraded: true.',
     ].join('\n'),
     {
       receive_id:      z.string().describe('open_id (ou_xxx) or chat_id (oc_xxx)'),
@@ -409,6 +430,7 @@ export function registerLoopTools(server: McpServer) {
     async ({ receive_id, title, body, fields, submit_label = '提交', blocking = false, timeout_seconds = 3600 }) =>
       withAuth(async () => {
         const client = getLarkClient();
+        const blockingWait = blocking && !BROKER_MODE;   // broker 下强制非阻塞，见 BROKER_MODE 注释
 
         const entryBase = {
           card_type: 'form' as const,
@@ -428,7 +450,7 @@ export function registerLoopTools(server: McpServer) {
         const expiry_at  = Date.now() + timeout_seconds * 1000;
         const expires_at = new Date(expiry_at).toISOString();
 
-        if (blocking) {
+        if (blockingWait) {
           let resolveCallback!: (r: { action: string; form_value?: Record<string, string> }) => void;
           const callbackPromise = new Promise<{ action: string; form_value?: Record<string, string> }>(res => { resolveCallback = res; });
 
@@ -450,7 +472,10 @@ export function registerLoopTools(server: McpServer) {
 
         // Non-blocking: register and return
         registerCard(message_id, { ...entryBase, expiry_at });
-        return { message_id, expires_at, timed_out: false };
+        return {
+          message_id, expires_at, timed_out: false,
+          ...(blocking && BROKER_MODE ? { blocking_downgraded: true } : {}),
+        };
       }),
   );
 
@@ -535,5 +560,72 @@ export function registerLoopTools(server: McpServer) {
         if (done) removeProgress(message_id);
         return { message_id, result: done ? 'Task complete.' : 'Updated.' };
       }),
+  );
+
+  // ── expire_cards ────────────────────────────────────────────────────────────
+  // Under the broker the 30s sweep wakes a turn when a card's TTL passes; call
+  // this to patch those cards to 已失效 and forget them. Safe anytime (no-op when
+  // nothing is expired). Outside the broker, feishu_im_watch drove the same
+  // sweep implicitly — this just makes it callable by hand.
+  server.tool(
+    'feishu_im_expire_cards',
+    [
+      'Grey out (expire) every confirm/form/progress card whose TTL has passed, and forget it.',
+      'The broker wakes a turn when this is needed; safe to call anytime — a no-op if nothing is expired.',
+      'Returns the list of cards it expired (empty when none).',
+    ].join('\n'),
+    {},
+    async () => withAuth(async () => {
+      const expired: Array<{ message_id: string; kind: string; title?: string }> = [];
+
+      for (const { message_id, entry } of listExpiredCards()) {
+        const card = entry.card_type === 'form'
+          ? buildFormExpiredCard(entry)
+          : buildConfirmExpiredCard(entry);
+        await patchCard(message_id, card);
+        removeCard(message_id);
+        expired.push({ message_id, kind: entry.card_type, title: entry.title });
+      }
+
+      for (const { message_id, state } of listExpiredProgress()) {
+        await patchCard(message_id, buildProgressCard(state.title, state.steps, state.currentStep, true));
+        removeProgress(message_id);
+        expired.push({ message_id, kind: 'progress', title: state.title });
+      }
+
+      return { expired };
+    }),
+  );
+
+  // ── card_responded ──────────────────────────────────────────────────────────
+  // Under the broker the click lands on the broker's WS handler, which can only
+  // return a toast — it can't update the card face. The click is pushed as a
+  // callback event instead; call this with the clicked card's msg_id to flip its
+  // face to 已确认 / 已取消 / 已提交 and forget it. Without it a clicked card would
+  // just sit active until its TTL expires. No-op for unregistered/raw cards.
+  server.tool(
+    'feishu_im_card_responded',
+    [
+      'Reflect a card click on the card face: confirm/form cards become 已确认 / 已取消 / 已提交.',
+      'Call it right after handling a card callback event (broker push), passing the clicked card msg_id.',
+      'Without this the card stays active until it expires, since the broker can only return a toast.',
+      'No-op if the msg_id is not a registered confirm/form card.',
+    ].join('\n'),
+    {
+      message_id: z.string().describe('msg_id of the clicked card (from the card callback event)'),
+      action:     z.string().describe("Callback action: 'confirm' | 'cancel' for confirm cards, 'form_submit' for forms"),
+      form_value: z.record(z.string()).optional().describe('Submitted field values (form cards only)'),
+    },
+    async ({ message_id, action, form_value }) => withAuth(async () => {
+      const entry = lookupCard(message_id);
+      if (!entry) return { patched: false, reason: 'not_registered' };
+
+      const card = entry.card_type === 'form'
+        ? buildFormSubmittedCard(entry, form_value ?? {})
+        : buildConfirmRespondedCard(entry, action === 'cancel' ? 'cancel' : 'confirm');
+      await patchCard(message_id, card);
+      removeCard(message_id);
+      return { patched: true, kind: entry.card_type, action, title: entry.title };
+    }),
   );
 }

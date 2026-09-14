@@ -1,6 +1,6 @@
 # lark-mcp-server — Usage Guide
 
-General principles for using this MCP server. For per-tool details, inject relevant skill (e.g. feishu-calendar, feishu-im, feishu-watch-loop).
+General principles for using this MCP server. For per-tool details, inject the relevant skill (e.g. feishu-calendar, feishu-im, feishu-doc).
 
 ---
 
@@ -8,17 +8,13 @@ General principles for using this MCP server. For per-tool details, inject relev
 
 1. **Auth on-demand.** Messaging works without any OAuth — the bot uses its own App Token. Calendar, tasks, docs, and people search require user authorization. The tool will automatically send an authorization request to the owner in Feishu. Call `feishu_auth_status` to check what modules are currently authorized.
 
-2. **Chat through the watch/send loop.** Day-to-day conversation happens over Feishu: `feishu_im_watch` listens for incoming messages, reply via `feishu_im_send`, then immediately resume `feishu_im_watch`. This covers ordinary chat, Q&A, and read-only requests. On receiving a request, reply briefly or acknowledge first, then execute and report back when done. Always close a finished turn with `feishu_im_send` (final reply) then `feishu_im_watch` (listening again) — never leave the loop dangling. Send messages as plain text only — Lark does not render markdown, so no *, #, or list markers.
+2. **Talk over Feishu, driven by the broker.** A separate broker process holds the Feishu long-connection and pushes incoming messages to you in batches. Each turn: read the batch the broker handed you, reply via `feishu_im_send`, and end the turn. This covers ordinary chat, Q&A, and read-only requests. On receiving a request, reply briefly or acknowledge first, then execute and report back when done. Every turn must end with a `feishu_im_send` reply — do not leave a message unanswered. Send messages as plain text only — Lark does not render markdown, so no *, #, or list markers.
 
 3. **Use cards when appropriate.** Two cards are part of daily use:
    - **Confirm** (`feishu_im_send_confirm`): send before any state-changing or hard-to-reverse action — modifying or deleting files, downloads, operations with side effects (installing packages, flashing, changing config, deleting files), and starting work on a plan you've already approved. Always `blocking=false`; if the callback never arrives, treat as cancel and do not execute.
    - **Form** (`feishu_im_send_form`): use to collect credentials or params from you (API keys, ids, secrets).
 
-4. **Post-compaction recovery.** When resuming from a compaction summary, immediately recover — do not wait for the user:
-   - `feishu_auth_whoami` → get owner `open_id`
-   - `feishu_im_send(open_id, "...")` → any brief message; use the returned `chat_id`
-   - `feishu_im_watch(chat_id)` → listening again
-   - To automate this, install the Claude Code SessionStart hook in `hooks/feishu-watch-recover.sh` — see README for instructions. When installed, the hook injects the recovery reminder into Claude's context automatically on every post-compaction session start.
+4. **Post-compaction recovery.** After resuming from a compaction summary, run `feishu_auth_whoami` to recover the owner `open_id`.
 
 5. **Clarify before acting.** When a task is ambiguous or missing key details, ask the user to clarify first, then act once the goal is clear.
 
@@ -36,18 +32,18 @@ General principles for using this MCP server. For per-tool details, inject relev
 
 ## Environment
 
-Three machines are in play. The server (Alibaba Cloud) hosts this MCP and 白咲 — be careful with heavy operations here. The user's Windows machine is the dev toolchain (STM32, Live2D), reached through the frp tunnel via `win_exec`. The Pi 5 is the project main controller, reached via `pi_exec`. For details see memory: environment-setup and frp-deployment-guide.
+Three machines are in play. The server (Alibaba Cloud) hosts this MCP and 白咲 — be careful with heavy operations here. The user's Windows machine is the dev toolchain (STM32, Live2D), reachable via `win_exec` through the frp tunnel. The Pi 5 via `pi_exec`. For details see memory: environment-setup and frp-deployment-guide.
 
 ---
 
 ## Event Handling Loop
 
-1. Watch for a message via `feishu_im_watch`.
+1. Read the batch of events the broker pushed (each carries source chat, sender, time, message_id, type, raw content).
 2. Judge the request: plain chat / read-only → handle directly; modifying, deleting, downloading or any side-effecting action → send a confirm card first (`blocking=false`); credentials or params needed (keys, ids, secrets) → send a form card.
 3. For complex tasks, reply briefly that you received it, then start.
-4. Execute. Sending interim progress updates via `feishu_im_send` during execution is encouraged.
+4. Execute. Frequent interim progress updates via `feishu_im_send` during execution are encouraged.
 5. Send the final result via `feishu_im_send` (plain text).
-6. Immediately resume `feishu_im_watch` and go back to step 1.
+6. End the turn. The broker pushes the next batch when new messages arrive.
 
 ---
 
@@ -63,7 +59,6 @@ Load a skill for detailed guidance on a specific domain:
 | `feishu-people` | User search and open_id resolution |
 | `feishu-im` | Send, reply, read, search, files, attachments, edit messages |
 | `feishu-interactive-cards` | Confirm dialogs, forms, progress tracker cards |
-| `feishu-watch-loop` | Watch-loop rules: structure, schedules, responding via Feishu |
 | `feishu-doc` | Create, fetch, append, edit, delete, search documents |
 | `feishu-comment` | Document comments: list, reply, resolve, react |
 | `feishu-wiki` | Wiki knowledge-space operations: nodes, members |

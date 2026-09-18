@@ -8,9 +8,9 @@
  *   LARK_APP_ID=cli_xxx LARK_APP_SECRET=xxx npx tsx src/index.ts
  *
  * On first run:
- *   1. Call feishu_auth_init  → get a browser URL
- *   2. Authorize in the browser
- *   3. Call feishu_auth_complete  → saves token, enables all tools
+ *   1. Call feishu_auth_init  → sends an auth card in Feishu + returns the URL
+ *   2. Authorize in the browser (or tap the card)
+ *   3. feishu_auth_init polls until the token arrives, then saves it and enables all tools
  *
  * Token is persisted at ~/.config/lark-mcp/tokens.json and auto-refreshed.
  *
@@ -57,7 +57,7 @@ process.on('uncaughtException', (err) => {
 
 const server = new McpServer({
   name: 'lark-mcp',
-  version: '0.1.0',
+  version: '0.3.0',
 });
 
 // Load persisted token and schedule auto-refresh

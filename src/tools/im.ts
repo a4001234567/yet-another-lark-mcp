@@ -46,6 +46,7 @@ export function registerImTools(server: McpServer) {
       'Send a message or reply.',
       '',
       'receive_id: ou_xxx (open_id), oc_xxx (chat_id), om_xxx (replies to that message), email, or user_id.',
+      'Topic-groups: pass the message om_ id plus reply_in_thread=true to post into that topic.',
       'Type is auto-detected from prefix — no receive_id_type needed.',
       '',
       'MESSAGE TYPES (pick one):',
@@ -66,8 +67,10 @@ export function registerImTools(server: McpServer) {
       card:       z.string().optional().describe('Interactive card as a JSON string (schema 2.0). Use for tables, buttons, complex layouts.'),
       file_path:  z.string().optional().describe('Absolute local path to a file or image to send. Images (.png/.jpg/.gif/.webp) are sent as image messages; other files as attachments.'),
       file_name:  z.string().optional().describe('Override display filename (defaults to basename of file_path)'),
+      reply_in_thread: z.boolean().optional()
+                    .describe('Only for om_ (reply) targets: post the reply into a topic/thread instead of as a flat reply. Use in topic-groups.'),
     },
-    async ({ receive_id, text, post_title, post_rows, card, file_path, file_name }) => withAuth(async () => {
+    async ({ receive_id, text, post_title, post_rows, card, file_path, file_name, reply_in_thread }) => withAuth(async () => {
       if (!receive_id) throw new Error('Provide receive_id');
       const isReply = detectIdType(receive_id) === 'reply';
       const client = getLarkClient();
@@ -122,13 +125,13 @@ export function registerImTools(server: McpServer) {
       if (isReply) {
         res = await client.im.message.reply({
           path: { message_id: receive_id },
-          data: { msg_type, content },
+          data: { msg_type, content, ...(reply_in_thread ? { reply_in_thread: true } : {}) },
         });
       } else {
         res = await client.im.message.create({
           params: { receive_id_type: detectIdType(receive_id) },
           data: { receive_id, msg_type, content },
-        });
+        } as any);
       }
       if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
       // Live2D: message sent → idle (put down pen)

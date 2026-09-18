@@ -428,13 +428,18 @@ export async function pollDeviceToken(
     });
     if (!res.error && res.access_token) {
       const expiresIn = res.expires_in ?? 7200;
+      const scopeList = res.scope ? String(res.scope).split(/\s+/).filter(Boolean) : [];
       tokenStore = {
         access_token: res.access_token,
         refresh_token: res.refresh_token,
         expires_at: Date.now() + expiresIn * 1000,
         owner_open_id: tokenStore?.owner_open_id,
+        granted_scopes: tokenStore?.granted_scopes, // preserve across re-auth (mirrors doRefresh)
       };
-      saveTokenFile(tokenStore);
+      // The v2 device-flow response carries the granted scope list. Record it so a
+      // cold restart doesn't see "scopes unknown" and re-prompt for authorization.
+      if (scopeList.length) saveGrantedScopes(scopeList);
+      else saveTokenFile(tokenStore);
       scheduleRefresh();
       process.stderr.write(`[lark-mcp] Auth complete (expires ${new Date(tokenStore.expires_at).toISOString()})\n`);
       return;

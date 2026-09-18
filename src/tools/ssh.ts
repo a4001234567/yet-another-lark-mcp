@@ -54,8 +54,9 @@ function sshExec(command: string, cfg: SshConfig, retries = 2): string {
       // Transient failure (spawn timeout, connection refused, etc.) — retry
       const delay = attempt * 500;
       process.stderr.write(`[ssh] attempt ${attempt} failed, retrying in ${delay}ms: ${err?.message ?? err}\n`);
-      const deadline = Date.now() + delay;
-      while (Date.now() < deadline) { /* spin */ }
+      // sshExec is synchronous (execSync) — callers expect a blocking function.
+      // Atomics.wait blocks without burning CPU, unlike a Date.now() spin loop.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
     }
   }
   throw new Error('sshExec unreachable');

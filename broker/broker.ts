@@ -4,8 +4,8 @@
  * 职责（越傻越对）：
  *   1. 持有一条飞书长连接，收应用能收到的所有消息 + 卡片回调
  *   2. 游标切批：每批 = 上次 flush 之后的所有新事件（batch 不是 queue）
- *   3. Agent 空闲时跑一轮：默认 spawn 一个 claude -p --resume（每轮重载整段会话）；
- *      BROKER_PERSISTENT=1 时改为常驻一个 claude、用 stream-json 把每批喂进去
+ *   3. Agent 空闲时跑一轮：默认常驻一个 claude、用 stream-json 把每批喂进去（上下文留在进程内）；
+ *      BROKER_PERSISTENT=0 时退回 spawn 一个 claude -p --resume（每轮重载整段会话）
  *   4. 定时 schedule 也在这儿触发（原本挂在 watch 的 tick 上）
  *
  * 不做：语义判断、摘要、会话路由（只有单会话）、把白咲自己发的回推。
@@ -76,6 +76,7 @@ type MessageItem = {
   create_time: number;   // unix ms
   content:     any;
   parent_id?:  string;
+  thread_id?:  string;   // 话题群：该消息所属话题（omt_xxx）
 };
 
 type CardItem = {
@@ -208,6 +209,7 @@ function startReceiver(): void {
         create_time: parseInt(msg.create_time ?? '0', 10),
         content,
         parent_id:   msg.parent_id || undefined,
+        thread_id:   msg.thread_id || undefined,
       };
       item.chat_name   = await lookupChatName(item.chat_id);
       item.sender_name = await lookupUserName(item.sender_id);
@@ -391,6 +393,8 @@ function renderBatch(batch: BatchItem[]): string {
       const where = `${e.chat_name ?? '?'}(${e.chat_id})`;
       lines.push(`#${i + 1} 消息 | 会话: ${where} | 发送者: ${who} | 时间: ${fmtTime(e.create_time)} | 类型: ${e.msg_type} | msg_id: ${e.message_id}`);
       if (e.parent_id) lines.push(`   (回复自 parent_id=${e.parent_id})`);
+      // 话题群：回复这条消息时带 reply_in_thread=true 就落在该话题里（往 omt_ id 直接发是 400，别试）。
+      if (e.thread_id) lines.push(`   (话题 thread_id=${e.thread_id} — 想回在这个话题里，就回复这条 msg_id 并带 reply_in_thread=true)`);
       lines.push(`   内容: ${contentToText(e.content)}`);
     } else if (e.kind === 'card') {
       lines.push(`#${i + 1} 卡片回调 | 卡片 msg_id: ${e.message_id} | 点击者: ${e.open_name ?? '?'}(${e.open_id}) | 动作: ${e.action} | 时间: ${fmtTime(e.timestamp)}`);
@@ -440,12 +444,13 @@ function runTurnSpawn(batch: BatchItem[]): Promise<void> {
   });
 }
 
-// ── 常驻驱动（BROKER_PERSISTENT=1 时启用）───────────────────────────────────
+// ── 常驻驱动（默认启用；BROKER_PERSISTENT=0 关闭）───────────────────────────
 // 与 runTurnSpawn 的区别：不再每轮 spawn + --resume 重载整段会话，而是常驻一个
 // claude 进程，用 stream-json 把每批事件当一条 user 消息喂进去，上下文留在进程内。
 // 进程崩了下次自动重拉（带上已捕获的 session id 续接）。
 
-const USE_PERSISTENT = process.env.BROKER_PERSISTENT === '1';
+// 常驻是默认（缺月 2026-09-15 定）；显式 BROKER_PERSISTENT=0 才退回老的逐轮 spawn 模式。
+const USE_PERSISTENT = process.env.BROKER_PERSISTENT !== '0';
 // 常驻进程起手 resume SESSION_ID（即当前会话），上下文无缝接上；resume 会沿用同一个
 // session id，所以重启 broker 也一直挂在这条会话上，不必另存 id。
 let persistSessionId = process.env.BROKER_PERSISTENT_SEED || SESSION_ID;
@@ -648,7 +653,29 @@ function runTurnPersistent(batch: BatchItem[]): Promise<void> {
   });
 }
 
+// 「起一轮」的视觉提示：收到一批就让 Live2D 抬手/拿笔，回复时由 feishu_im_send 复位成无
+// ——凑回旧 watch 的两拍。挂在起轮这个事件上，两种驱动（常驻 / 逐轮 spawn）都覆盖。
+// detached ssh、失败静默：手势是装饰，绝不能卡住起轮。WIN_SSH_* 由上面的 loadSettingsEnv 补齐。
+function fireTurnCue(): void {
+  const key = process.env.WIN_SSH_KEY;
+  if (!key) return;   // 没配就跳过，不报错
+  const remote = 'C:\\Users\\shirosaki\\live2d\\venv\\bin\\python C:\\Users\\shirosaki\\live2d\\live2d.py expression --id 4';
+  try {
+    spawn('ssh', [
+      '-o', 'StrictHostKeyChecking=no',
+      '-o', 'ConnectTimeout=10',
+      '-o', 'BatchMode=yes',
+      '-o', 'PasswordAuthentication=no',
+      '-p', process.env.WIN_SSH_PORT || '2226',
+      '-i', key,
+      `${process.env.WIN_SSH_USER || 'shirosaki'}@${process.env.WIN_SSH_HOST || 'localhost'}`,
+      remote,
+    ], { detached: true, stdio: 'ignore' }).unref();
+  } catch { /* best-effort */ }
+}
+
 function runTurn(batch: BatchItem[]): Promise<void> {
+  fireTurnCue();
   return USE_PERSISTENT ? runTurnPersistent(batch) : runTurnSpawn(batch);
 }
 

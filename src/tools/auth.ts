@@ -2,9 +2,9 @@
  * feishu_auth_* MCP tools — OAuth device flow.
  *
  * Usage:
- *   1. Call feishu_auth_init  → get verification_url + user_code
+ *   1. Call feishu_auth_init  → get verification_url + user_code (sends an auth card)
  *   2. User visits URL and enters user_code (or scans QR)
- *   3. Call feishu_auth_complete → polls until token arrives
+ *   3. feishu_auth_init polls until the token arrives, then saves it
  *   4. All subsequent tool calls use the stored token automatically
  */
 

@@ -29,7 +29,7 @@ This is a **personal** Lark/Feishu MCP server — built for single-user use by t
 
 Tools that act on behalf of the user — including calendar, tasks, and docs — require authentication. All other tools work without authentication unless otherwise specified.
 
-**Auth flow:** Call `feishu_auth_init` — it blocks until authorized (up to 5 min) then returns. Either a card is sent for auth, or when the receiver is unknown, a link is returned as text — the user can open it directly to authorize, or send any message to the bot to receive the auth card.
+**Auth flow:** Call `feishu_auth_init` — it blocks until authorized (up to 10 min) then returns. Either a card is sent for auth, or when the receiver is unknown, a link is returned as text — the user can open it directly to authorize, or send any message to the bot to receive the auth card.
 
 ---
 

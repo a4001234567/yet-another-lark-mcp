@@ -105,9 +105,19 @@ export const live2d = {
     const isPreFormatted = /^[^\w]/.test(toolName);
     const text = isPreFormatted ? toolName : `🔧 ${toolName}`;
     const safe = text.replace(/"/g, '\\"');
-    const cmd = `${VENV_PYTHON} ${LIVE2D_SCRIPT} bubble --text "${safe}" --duration 10000`;
     try {
-      sshExec(cmd);
+      const cfg = getSshConfig();
+      const remote = `${VENV_PYTHON} ${LIVE2D_SCRIPT} bubble --text "${safe}" --duration 10000`;
+      spawn('ssh', [
+        '-o', 'StrictHostKeyChecking=no',
+        '-o', 'ConnectTimeout=10',
+        '-o', 'BatchMode=yes',
+        '-o', 'PasswordAuthentication=no',
+        '-p', cfg.port,
+        '-i', cfg.key,
+        `${cfg.user}@${cfg.host}`,
+        remote,
+      ], { detached: true, stdio: 'ignore' }).unref();
     } catch {
       // best-effort
     }
